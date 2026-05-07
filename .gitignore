@@ -1,0 +1,8 @@
+# Logs (runtime artifacts)
+logs/*.csv
+logs/*.json
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+

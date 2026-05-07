@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CZTV — Camera Panel Prototype</title>
+    <style>
+      :root {
+        --bg: #0b0f17;
+        --text: #e8eefc;
+        --muted: #a7b3cc;
+        --gap: 0px;
+        --radius: 0px;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans";
+        background: var(--bg);
+        color: var(--text);
+      }
+      .app {
+        height: 100%;
+        display: grid;
+        grid-template-rows: 1fr;
+      }
+      main {
+        padding: var(--gap);
+        height: 100%;
+        box-sizing: border-box;
+      }
+      .grid {
+        height: 100%;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-template-rows: 1fr 1fr;
+        gap: var(--gap);
+      }
+      .tile {
+        position: relative;
+        border-radius: var(--radius);
+        overflow: hidden;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        background: rgba(255, 255, 255, 0.03);
+        display: grid;
+        grid-template-rows: 1fr;
+        touch-action: manipulation;
+        user-select: none;
+      }
+      .tileBody {
+        position: relative;
+        display: grid;
+        place-items: center;
+        background: #0f1622;
+        overflow: hidden;
+      }
+      .placeholder {
+        padding: 16px;
+        text-align: center;
+        color: var(--muted);
+        line-height: 1.4;
+        max-width: 520px;
+      }
+      .feed {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        background: #000;
+      }
+      .feed:not([data-ready="true"]) {
+        display: none;
+      }
+      .tile[data-ready="true"] .placeholder {
+        display: none;
+      }
+      .maximized .grid {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
+      }
+      .maximized .tile {
+        display: none;
+      }
+      .maximized .tile[data-max="true"] {
+        display: grid;
+      }
+
+      /* Researcher-only startup overlay (hidden once camera is live). */
+      #startOverlay[hidden] {
+        display: none;
+      }
+      #startOverlay {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        background: rgba(0, 0, 0, 0.88);
+        touch-action: manipulation;
+      }
+      #startOverlay button {
+        font: inherit;
+        font-weight: 900;
+        font-size: 22px;
+        padding: 18px 24px;
+        border-radius: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        color: #ffffff;
+        background: rgba(255, 255, 255, 0.08);
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <main>
+        <div class="grid" id="grid">
+          <div class="tile" data-tile="1">
+            <div class="tileBody">
+              <div class="placeholder"></div>
+              <video class="feed" autoplay muted playsinline></video>
+            </div>
+          </div>
+          <div class="tile" data-tile="2">
+            <div class="tileBody">
+              <div class="placeholder"></div>
+              <video class="feed" autoplay muted playsinline></video>
+            </div>
+          </div>
+          <div class="tile" data-tile="3">
+            <div class="tileBody">
+              <div class="placeholder"></div>
+              <video class="feed" autoplay muted playsinline></video>
+            </div>
+          </div>
+          <div class="tile" data-tile="4">
+            <div class="tileBody">
+              <div class="placeholder"></div>
+              <video class="feed" autoplay muted playsinline></video>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <div id="startOverlay" hidden>
+      <button id="btnStart" type="button">Start camera</button>
+    </div>
+
+    <script>
+      const tiles = Array.from(document.querySelectorAll(".tile"));
+
+      const sessionId =
+        (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
+        `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const LOG_KEY = "cztv_usage_log_v1";
+      const LOG_MAX = 2000;
+
+      function nowIso() {
+        return new Date().toISOString();
+      }
+
+      function readLog() {
+        try {
+          const raw = localStorage.getItem(LOG_KEY);
+          const parsed = raw ? JSON.parse(raw) : [];
+          return Array.isArray(parsed) ? parsed : [];
+        } catch {
+          return [];
+        }
+      }
+
+      function writeLog(entries) {
+        try {
+          localStorage.setItem(LOG_KEY, JSON.stringify(entries.slice(-LOG_MAX)));
+        } catch {
+          // Best-effort only (storage may be disabled / full).
+        }
+      }
+
+      let serverQueue = [];
+      let serverFlushTimer = null;
+
+      function enqueueForServer(entry) {
+        serverQueue.push(entry);
+        if (!serverFlushTimer) {
+          serverFlushTimer = setTimeout(flushToServer, 1000);
+        }
+      }
+
+      async function flushToServer() {
+        serverFlushTimer = null;
+        if (!serverQueue.length) return;
+
+        const batch = serverQueue;
+        serverQueue = [];
+        try {
+          await fetch("/log", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ events: batch }),
+            keepalive: true,
+          });
+        } catch {
+          // If the server isn't available, keep localStorage as the source of truth.
+          // Put events back on the front and try again later.
+          serverQueue = batch.concat(serverQueue);
+          serverFlushTimer = setTimeout(flushToServer, 5000);
+        }
+      }
+
+      window.addEventListener("beforeunload", () => {
+        // Best-effort final flush. keepalive helps, but isn't guaranteed.
+        if (serverQueue.length) {
+          try {
+            navigator.sendBeacon("/log", JSON.stringify({ events: serverQueue }));
+          } catch {
+            // ignore
+          }
+        }
+      });
+
+      function logEvent(type, details) {
+        const entry = {
+          ts: nowIso(),
+          sessionId,
+          type,
+          ...details,
+        };
+        const next = readLog();
+        next.push(entry);
+        writeLog(next);
+        // Researcher debugging: always emit to console too.
+        console.log("[CZTV]", entry);
+        enqueueForServer(entry);
+      }
+
+      logEvent("app_start", { href: location.href });
+
+      function setMax(tileEl, reason) {
+        tiles.forEach((t) => t.setAttribute("data-max", t === tileEl ? "true" : "false"));
+        document.body.classList.add("maximized");
+        logEvent("tile_maximize", {
+          tile: tileEl.getAttribute("data-tile"),
+          reason,
+        });
+      }
+
+      function setFourUp(reason) {
+        const active = document.querySelector('.tile[data-max="true"]');
+        tiles.forEach((t) => t.removeAttribute("data-max"));
+        document.body.classList.remove("maximized");
+        logEvent("tile_minimize", {
+          tile: active ? active.getAttribute("data-tile") : null,
+          reason,
+        });
+      }
+
+      tiles.forEach((t) => {
+        t.addEventListener("click", () => {
+          if (document.body.classList.contains("maximized")) return setFourUp("tap");
+          return setMax(t, "tap");
+        });
+      });
+
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") setFourUp("esc");
+      });
+
+      const startOverlay = document.getElementById("startOverlay");
+      const startBtn = document.getElementById("btnStart");
+      const feeds = Array.from(document.querySelectorAll("video.feed"));
+      let activeStreams = [];
+
+      function showOverlay() {
+        startOverlay.hidden = false;
+      }
+      function hideOverlay() {
+        startOverlay.hidden = true;
+      }
+
+      function attachStreamToTiles(stream, tileIndexes) {
+        tileIndexes.forEach((idx) => {
+          const v = feeds[idx];
+          if (!v) return;
+          v.srcObject = stream;
+          v.dataset.ready = "true";
+          v.closest(".tile").dataset.ready = "true";
+        });
+      }
+
+      function stopAllStreams() {
+        activeStreams.forEach((s) => s.getTracks().forEach((t) => t.stop()));
+        activeStreams = [];
+      }
+
+      async function getVideoInputs() {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        return devices.filter((d) => d.kind === "videoinput");
+      }
+
+      async function startCameras() {
+        if (activeStreams.length) return;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+          showOverlay();
+          return;
+        }
+        startBtn.disabled = true;
+        try {
+          // First request: triggers permission prompt early and unlocks device labels.
+          const warmupStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+            audio: false,
+          });
+          warmupStream.getTracks().forEach((t) => t.stop());
+
+          const inputs = await getVideoInputs();
+
+          if (inputs.length >= 2) {
+            const [camA, camB] = inputs;
+            const [streamA, streamB] = await Promise.all([
+              navigator.mediaDevices.getUserMedia({
+                video: { deviceId: { exact: camA.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: false,
+              }),
+              navigator.mediaDevices.getUserMedia({
+                video: { deviceId: { exact: camB.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
+                audio: false,
+              }),
+            ]);
+            activeStreams = [streamA, streamB];
+
+            // Map 2 cameras into 4 tiles: A on top row, B on bottom row.
+            attachStreamToTiles(streamA, [0, 1]);
+            attachStreamToTiles(streamB, [2, 3]);
+          } else {
+            const stream = await navigator.mediaDevices.getUserMedia({
+              video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+              audio: false,
+            });
+            activeStreams = [stream];
+            attachStreamToTiles(stream, [0, 1, 2, 3]);
+          }
+
+          hideOverlay();
+        } catch (err) {
+          stopAllStreams();
+          startBtn.disabled = false;
+          showOverlay();
+        }
+      }
+
+      startBtn.addEventListener("click", startCameras);
+
+      // Try immediately on load so the researcher sees the permission prompt early.
+      // If the browser requires a gesture, the overlay stays up with one big Start button.
+      startCameras();
+    </script>
+  </body>
+</html>
+
