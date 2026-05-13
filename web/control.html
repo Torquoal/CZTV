@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CZTV — Researcher control</title>
+    <style>
+      :root {
+        --bg: #0f1419;
+        --card: #171d26;
+        --text: #e8eefc;
+        --muted: #9aa7bf;
+        --accent: #5b8cff;
+        --radius: 12px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.5;
+      }
+      .wrap {
+        max-width: 560px;
+        margin: 0 auto;
+        padding: 24px 20px 48px;
+      }
+      h1 {
+        font-size: 1.25rem;
+        margin: 0 0 8px;
+      }
+      p.lead {
+        margin: 0 0 24px;
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+      section {
+        background: var(--card);
+        border-radius: var(--radius);
+        padding: 18px 18px 20px;
+        margin-bottom: 16px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+      }
+      section h2 {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        margin: 0 0 12px;
+      }
+      label {
+        display: block;
+        font-size: 0.85rem;
+        margin-bottom: 6px;
+      }
+      input[type="text"] {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(0, 0, 0, 0.25);
+        color: var(--text);
+        font-size: 1rem;
+      }
+      input[type="text"]::placeholder {
+        color: var(--muted);
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+      .choice {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        font-size: 0.95rem;
+      }
+      .choice input {
+        accent-color: var(--accent);
+      }
+      select {
+        width: 100%;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.12);
+        background: rgba(0, 0, 0, 0.25);
+        color: var(--text);
+        font-size: 0.95rem;
+      }
+      .hint {
+        margin-top: 10px;
+        font-size: 0.8rem;
+        color: var(--muted);
+      }
+      a {
+        color: var(--accent);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <h1>CZTV — Researcher control</h1>
+      <p class="lead">
+        Open the chimp wall at <a href="/" target="_blank" rel="noopener">/</a> in another tab. Changes here apply in real time and are stored in this browser (localStorage + BroadcastChannel).
+      </p>
+
+      <section>
+        <h2>Participant</h2>
+        <label for="participantId">Participant ID (logged on every event)</label>
+        <input
+          id="participantId"
+          type="text"
+          autocomplete="off"
+          placeholder="e.g. P042 or anonymous"
+          maxlength="128"
+        />
+        <p class="hint">Updating this logs a <code>participant_change</code> event on the wall tab.</p>
+      </section>
+
+      <section>
+        <h2>Wall mode</h2>
+        <div class="row">
+          <label class="choice">
+            <input type="radio" name="mode" value="live" checked />
+            Live cameras
+          </label>
+          <label class="choice">
+            <input type="radio" name="mode" value="recorded" />
+            Recorded videos
+          </label>
+        </div>
+        <p class="hint">Recorded mode uses files under <code>/media/</code> (served from the repo <code>media/</code> folder).</p>
+      </section>
+
+      <section id="presetSection">
+        <h2>Video preset (recorded mode)</h2>
+        <label for="preset">Which set of four clips maps to tiles 1–4</label>
+        <select id="preset" disabled></select>
+      </section>
+    </div>
+
+    <script src="cztv-shared.js"></script>
+    <script>
+      const { CHANNEL, readState, writeState, PRESETS } = window.CZTV;
+      let bc = null;
+      try {
+        bc = new BroadcastChannel(CHANNEL);
+      } catch {
+        console.warn("BroadcastChannel not available");
+      }
+
+      const elParticipant = document.getElementById("participantId");
+      const elPreset = document.getElementById("preset");
+
+      function getMode() {
+        const r = document.querySelector('input[name="mode"]:checked');
+        return r && r.value === "recorded" ? "recorded" : "live";
+      }
+
+      function setUIFromState(s) {
+        elParticipant.value = s.participantId || "";
+        document.querySelectorAll('input[name="mode"]').forEach((inp) => {
+          inp.checked = inp.value === s.mode;
+        });
+        elPreset.value = s.preset in PRESETS ? s.preset : "default";
+        elPreset.disabled = s.mode !== "recorded";
+      }
+
+      function broadcast(next) {
+        if (bc) {
+          try {
+            bc.postMessage({ type: "state", payload: next });
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+
+      function pushUpdate(partial) {
+        const next = writeState({ ...readState(), ...partial });
+        setUIFromState(next);
+        broadcast(next);
+      }
+
+      function fillPresetOptions() {
+        elPreset.innerHTML = "";
+        const labels = {
+          default: "Default (jungle, chimpvid, crossing, chimps2vid)",
+          alt_order: "Alt order (swap positions)",
+        };
+        for (const id of Object.keys(PRESETS)) {
+          const opt = document.createElement("option");
+          opt.value = id;
+          opt.textContent = labels[id] || id;
+          elPreset.appendChild(opt);
+        }
+      }
+
+      function init() {
+        fillPresetOptions();
+        const s = readState();
+        setUIFromState(s);
+        broadcast(s);
+
+        elParticipant.addEventListener("change", () => {
+          pushUpdate({ participantId: elParticipant.value.trim() });
+        });
+        elParticipant.addEventListener("blur", () => {
+          pushUpdate({ participantId: elParticipant.value.trim() });
+        });
+
+        document.querySelectorAll('input[name="mode"]').forEach((inp) => {
+          inp.addEventListener("change", () => {
+            pushUpdate({ mode: getMode() });
+          });
+        });
+
+        elPreset.addEventListener("change", () => {
+          pushUpdate({ preset: elPreset.value });
+        });
+
+        if (bc) {
+          bc.addEventListener("message", (ev) => {
+            if (!ev.data || ev.data.type !== "state" || !ev.data.payload) return;
+            const s2 = writeState(ev.data.payload);
+            setUIFromState(s2);
+          });
+        }
+
+        window.addEventListener("storage", (e) => {
+          if (e.key !== window.CZTV.STORAGE_KEY || e.newValue == null) return;
+          try {
+            const s3 = JSON.parse(e.newValue);
+            setUIFromState(writeState(s3));
+          } catch {
+            /* ignore */
+          }
+        });
+      }
+
+      init();
+    </script>
+  </body>
+</html>

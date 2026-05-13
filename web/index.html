@@ -145,9 +145,10 @@
     </div>
 
     <div id="startOverlay" hidden>
-      <button id="btnStart" type="button">Start camera</button>
+      <button id="btnStart" type="button">Start</button>
     </div>
 
+    <script src="cztv-shared.js"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
 
@@ -156,6 +157,18 @@
         `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
       const LOG_KEY = "cztv_usage_log_v1";
       const LOG_MAX = 2000;
+
+      const { CHANNEL, readState, writeState, PRESETS } = window.CZTV;
+
+      /** @type {{ participantId: string, mode: string, preset: string }} */
+      let runtimeState = readState();
+
+      let bc = null;
+      try {
+        bc = new BroadcastChannel(CHANNEL);
+      } catch {
+        /* ignore */
+      }
 
       function nowIso() {
         return new Date().toISOString();
@@ -203,35 +216,40 @@
             keepalive: true,
           });
         } catch {
-          // If the server isn't available, keep localStorage as the source of truth.
-          // Put events back on the front and try again later.
           serverQueue = batch.concat(serverQueue);
           serverFlushTimer = setTimeout(flushToServer, 5000);
         }
       }
 
       window.addEventListener("beforeunload", () => {
-        // Best-effort final flush. keepalive helps, but isn't guaranteed.
         if (serverQueue.length) {
           try {
             navigator.sendBeacon("/log", JSON.stringify({ events: serverQueue }));
           } catch {
-            // ignore
+            /* ignore */
           }
         }
       });
+
+      function logContext() {
+        return {
+          participantId: runtimeState.participantId || "",
+          mode: runtimeState.mode,
+          preset: runtimeState.preset,
+        };
+      }
 
       function logEvent(type, details) {
         const entry = {
           ts: nowIso(),
           sessionId,
           type,
+          ...logContext(),
           ...details,
         };
         const next = readLog();
         next.push(entry);
         writeLog(next);
-        // Researcher debugging: always emit to console too.
         console.log("[CZTV]", entry);
         enqueueForServer(entry);
       }
@@ -272,12 +290,44 @@
       const startBtn = document.getElementById("btnStart");
       const feeds = Array.from(document.querySelectorAll("video.feed"));
       let activeStreams = [];
+      let mediaInFlight = false;
+
+      function setOverlayLabel(mode) {
+        startBtn.textContent = mode === "recorded" ? "Tap to play" : "Start camera";
+      }
 
       function showOverlay() {
+        setOverlayLabel(runtimeState.mode);
         startOverlay.hidden = false;
       }
+
       function hideOverlay() {
         startOverlay.hidden = true;
+      }
+
+      function clearRecordedVideos() {
+        feeds.forEach((v) => {
+          try {
+            v.pause();
+          } catch {
+            /* ignore */
+          }
+          v.removeAttribute("src");
+          v.srcObject = null;
+          try {
+            v.load();
+          } catch {
+            /* ignore */
+          }
+        });
+      }
+
+      function clearTileReady() {
+        feeds.forEach((v) => {
+          v.removeAttribute("data-ready");
+          const tile = v.closest(".tile");
+          if (tile) tile.removeAttribute("data-ready");
+        });
       }
 
       function attachStreamToTiles(stream, tileIndexes) {
@@ -300,15 +350,16 @@
         return devices.filter((d) => d.kind === "videoinput");
       }
 
-      async function startCameras() {
-        if (activeStreams.length) return;
+      async function startLiveCameras() {
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
           showOverlay();
           return;
         }
         startBtn.disabled = true;
         try {
-          // First request: triggers permission prompt early and unlocks device labels.
+          clearRecordedVideos();
+          clearTileReady();
+
           const warmupStream = await navigator.mediaDevices.getUserMedia({
             video: { width: { ideal: 1280 }, height: { ideal: 720 } },
             audio: false,
@@ -330,8 +381,6 @@
               }),
             ]);
             activeStreams = [streamA, streamB];
-
-            // Map 2 cameras into 4 tiles: A on top row, B on bottom row.
             attachStreamToTiles(streamA, [0, 1]);
             attachStreamToTiles(streamB, [2, 3]);
           } else {
@@ -346,16 +395,132 @@
           hideOverlay();
         } catch (err) {
           stopAllStreams();
+          clearTileReady();
           startBtn.disabled = false;
           showOverlay();
         }
       }
 
-      startBtn.addEventListener("click", startCameras);
+      async function startRecordedVideos() {
+        startBtn.disabled = true;
+        try {
+          stopAllStreams();
+          clearRecordedVideos();
+          clearTileReady();
 
-      // Try immediately on load so the researcher sees the permission prompt early.
-      // If the browser requires a gesture, the overlay stays up with one big Start button.
-      startCameras();
+          const urls = PRESETS[runtimeState.preset] || PRESETS.default;
+          feeds.forEach((v, i) => {
+            v.muted = true;
+            v.loop = true;
+            v.playsInline = true;
+            v.srcObject = null;
+            v.src = urls[i] || "";
+          });
+
+          let ok = 0;
+          for (const v of feeds) {
+            try {
+              await v.play();
+              ok += 1;
+            } catch {
+              /* autoplay policy or missing file */
+            }
+          }
+
+          if (ok === feeds.length) {
+            feeds.forEach((v) => {
+              v.dataset.ready = "true";
+              const tile = v.closest(".tile");
+              if (tile) tile.dataset.ready = "true";
+            });
+            hideOverlay();
+            startBtn.disabled = false;
+          } else {
+            clearTileReady();
+            startBtn.disabled = false;
+            setOverlayLabel("recorded");
+            showOverlay();
+          }
+        } catch {
+          clearTileReady();
+          startBtn.disabled = false;
+          setOverlayLabel("recorded");
+          showOverlay();
+        }
+      }
+
+      async function applyMediaFromState() {
+        if (mediaInFlight) return;
+        mediaInFlight = true;
+        try {
+          if (runtimeState.mode === "recorded") {
+            await startRecordedVideos();
+          } else {
+            await startLiveCameras();
+          }
+        } finally {
+          mediaInFlight = false;
+        }
+      }
+
+      function applyRemoteState(next, opts) {
+        const forceMedia = Boolean(opts && opts.forceMedia);
+        const prev = { ...runtimeState };
+        runtimeState = writeState(next);
+
+        if (prev.participantId !== runtimeState.participantId) {
+          logEvent("participant_change", {
+            fromParticipantId: prev.participantId || "",
+            toParticipantId: runtimeState.participantId || "",
+          });
+        }
+
+        const modeChanged = prev.mode !== runtimeState.mode;
+        const needMedia =
+          forceMedia ||
+          modeChanged ||
+          (runtimeState.mode === "recorded" &&
+            (prev.mode !== "recorded" || prev.preset !== runtimeState.preset));
+
+        if (needMedia && modeChanged) {
+          logEvent("mode_change", {
+            fromMode: prev.mode,
+            toMode: runtimeState.mode,
+            preset: runtimeState.preset,
+          });
+        } else if (needMedia && !modeChanged && runtimeState.mode === "recorded" && prev.preset !== runtimeState.preset) {
+          logEvent("preset_change", {
+            fromPreset: prev.preset,
+            toPreset: runtimeState.preset,
+          });
+        }
+
+        if (needMedia) {
+          applyMediaFromState();
+        }
+      }
+
+      if (bc) {
+        bc.addEventListener("message", (ev) => {
+          if (!ev.data || ev.data.type !== "state" || !ev.data.payload) return;
+          applyRemoteState(ev.data.payload);
+        });
+      }
+
+      window.addEventListener("storage", (e) => {
+        if (e.key !== window.CZTV.STORAGE_KEY || e.newValue == null) return;
+        try {
+          applyRemoteState(JSON.parse(e.newValue));
+        } catch {
+          /* ignore */
+        }
+      });
+
+      startBtn.addEventListener("click", () => {
+        applyMediaFromState();
+      });
+
+      applyRemoteState(readState(), { forceMedia: true });
     </script>
   </body>
 </html>
