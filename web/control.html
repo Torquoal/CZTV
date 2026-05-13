@@ -135,8 +135,15 @@
             <input type="radio" name="mode" value="recorded" />
             Recorded videos
           </label>
+          <label class="choice">
+            <input type="radio" name="mode" value="network" />
+            Network cameras (stub)
+          </label>
         </div>
-        <p class="hint">Recorded mode uses files under <code>/media/</code> (served from the repo <code>media/</code> folder).</p>
+        <p class="hint">
+          Recorded mode uses files under <code>/media/</code> (served from the repo <code>media/</code> folder). Network mode loads four stub gateway URLs from
+          <code>cztv-shared.js</code> (HLS-style placeholders; swap for your RTSP→HLS/WebRTC bridge later).
+        </p>
       </section>
 
       <section id="presetSection">
@@ -161,7 +168,9 @@
 
       function getMode() {
         const r = document.querySelector('input[name="mode"]:checked');
-        return r && r.value === "recorded" ? "recorded" : "live";
+        if (r && r.value === "recorded") return "recorded";
+        if (r && r.value === "network") return "network";
+        return "live";
       }
 
       function setUIFromState(s) {

@@ -61,6 +61,7 @@
         color: var(--muted);
         line-height: 1.4;
         max-width: 520px;
+        white-space: pre-wrap;
       }
       .feed {
         width: 100%;
@@ -158,7 +159,7 @@
       const LOG_KEY = "cztv_usage_log_v1";
       const LOG_MAX = 2000;
 
-      const { CHANNEL, readState, writeState, PRESETS } = window.CZTV;
+      const { CHANNEL, readState, writeState, PRESETS, NETWORK_STREAM_STUBS } = window.CZTV;
 
       /** @type {{ participantId: string, mode: string, preset: string }} */
       let runtimeState = readState();
@@ -293,7 +294,9 @@
       let mediaInFlight = false;
 
       function setOverlayLabel(mode) {
-        startBtn.textContent = mode === "recorded" ? "Tap to play" : "Start camera";
+        if (mode === "recorded") startBtn.textContent = "Tap to play";
+        else if (mode === "network") startBtn.textContent = "Load network streams";
+        else startBtn.textContent = "Start camera";
       }
 
       function showOverlay() {
@@ -319,6 +322,8 @@
           } catch {
             /* ignore */
           }
+          const ph = v.closest(".tileBody")?.querySelector(".placeholder");
+          if (ph) ph.textContent = "";
         });
       }
 
@@ -449,12 +454,67 @@
         }
       }
 
+      async function startNetworkStreams() {
+        startBtn.disabled = true;
+        try {
+          stopAllStreams();
+          clearRecordedVideos();
+          clearTileReady();
+
+          const stubs = Array.isArray(NETWORK_STREAM_STUBS) ? NETWORK_STREAM_STUBS : [];
+          feeds.forEach((v, i) => {
+            const url = stubs[i] || "";
+            const ph = v.closest(".tileBody")?.querySelector(".placeholder");
+            if (ph) {
+              ph.textContent = url ? `Network camera ${i + 1} (stub)\n${url}` : `Network camera ${i + 1} (no URL configured)`;
+            }
+            v.muted = true;
+            v.loop = false;
+            v.playsInline = true;
+            v.srcObject = null;
+            v.src = url;
+          });
+
+          let ok = 0;
+          for (const v of feeds) {
+            try {
+              await v.play();
+              ok += 1;
+            } catch {
+              /* missing gateway, CORS, codec, or autoplay */
+            }
+          }
+
+          if (ok === feeds.length) {
+            feeds.forEach((v) => {
+              v.dataset.ready = "true";
+              const tile = v.closest(".tile");
+              if (tile) tile.dataset.ready = "true";
+            });
+            hideOverlay();
+            startBtn.disabled = false;
+          } else {
+            clearTileReady();
+            startBtn.disabled = false;
+            setOverlayLabel("network");
+            showOverlay();
+          }
+        } catch {
+          clearTileReady();
+          startBtn.disabled = false;
+          setOverlayLabel("network");
+          showOverlay();
+        }
+      }
+
       async function applyMediaFromState() {
         if (mediaInFlight) return;
         mediaInFlight = true;
         try {
           if (runtimeState.mode === "recorded") {
             await startRecordedVideos();
+          } else if (runtimeState.mode === "network") {
+            await startNetworkStreams();
           } else {
             await startLiveCameras();
           }
