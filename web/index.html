@@ -149,6 +149,7 @@
       <button id="btnStart" type="button">Start</button>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
     <script src="cztv-shared.js"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
@@ -159,7 +160,7 @@
       const LOG_KEY = "cztv_usage_log_v1";
       const LOG_MAX = 2000;
 
-      const { CHANNEL, readState, writeState, PRESETS, NETWORK_STREAM_STUBS } = window.CZTV;
+      const { CHANNEL, readState, writeState, PRESETS } = window.CZTV;
 
       /** @type {{ participantId: string, mode: string, preset: string }} */
       let runtimeState = readState();
@@ -291,7 +292,58 @@
       const startBtn = document.getElementById("btnStart");
       const feeds = Array.from(document.querySelectorAll("video.feed"));
       let activeStreams = [];
+      let hlsPlayers = [];
       let mediaInFlight = false;
+
+      function stopHlsPlayers() {
+        hlsPlayers.forEach((h) => {
+          try {
+            h.destroy();
+          } catch {
+            /* ignore */
+          }
+        });
+        hlsPlayers = [];
+      }
+
+      function attachHlsToVideo(video, url) {
+        return new Promise((resolve) => {
+          let settled = false;
+          const done = (ok) => {
+            if (settled) return;
+            settled = true;
+            resolve(ok);
+          };
+
+          if (window.Hls && window.Hls.isSupported()) {
+            const hls = new window.Hls({ lowLatencyMode: true, backBufferLength: 0 });
+            hlsPlayers.push(hls);
+            hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+              video
+                .play()
+                .then(() => done(true))
+                .catch(() => done(false));
+            });
+            hls.on(window.Hls.Events.ERROR, (_e, data) => {
+              if (data && data.fatal) done(false);
+            });
+            hls.loadSource(url);
+            hls.attachMedia(video);
+            return;
+          }
+
+          if (video.canPlayType("application/vnd.apple.mpegurl")) {
+            video.src = url;
+            video
+              .play()
+              .then(() => done(true))
+              .catch(() => done(false));
+            return;
+          }
+
+          done(false);
+        });
+      }
 
       function setOverlayLabel(mode) {
         if (mode === "recorded") startBtn.textContent = "Tap to play";
@@ -362,6 +414,7 @@
         }
         startBtn.disabled = true;
         try {
+          stopHlsPlayers();
           clearRecordedVideos();
           clearTileReady();
 
@@ -410,6 +463,7 @@
         startBtn.disabled = true;
         try {
           stopAllStreams();
+          stopHlsPlayers();
           clearRecordedVideos();
           clearTileReady();
 
@@ -458,48 +512,79 @@
         startBtn.disabled = true;
         try {
           stopAllStreams();
+          stopHlsPlayers();
           clearRecordedVideos();
           clearTileReady();
 
-          const stubs = Array.isArray(NETWORK_STREAM_STUBS) ? NETWORK_STREAM_STUBS : [];
+          const res = await fetch("/api/cameras");
+          const cfg = await res.json();
+          const urls = Array.isArray(cfg.tileUrls) ? cfg.tileUrls : [];
+          const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
+
+          if (!cfg.ffmpeg) {
+            feeds.forEach((v, i) => {
+              const ph = v.closest(".tileBody")?.querySelector(".placeholder");
+              if (ph) {
+                ph.textContent =
+                  `Network camera ${i + 1}\nffmpeg not found — install FFmpeg and restart the server.`;
+              }
+            });
+            startBtn.disabled = false;
+            setOverlayLabel("network");
+            showOverlay();
+            return;
+          }
+
+          const tileMap = Array.isArray(cfg.tileMap) ? cfg.tileMap : [0, 1, 2, 3];
+
           feeds.forEach((v, i) => {
-            const url = stubs[i] || "";
+            const url = urls[i] || "";
+            const cam = cameras[tileMap[i] ?? i];
             const ph = v.closest(".tileBody")?.querySelector(".placeholder");
             if (ph) {
-              ph.textContent = url ? `Network camera ${i + 1} (stub)\n${url}` : `Network camera ${i + 1} (no URL configured)`;
+              const label = cam?.label || `Camera ${i + 1}`;
+              const host = cam?.host ? `${cam.host}${cam.path || ""}` : "not configured";
+              ph.textContent = url ? `${label}\n${host}` : `${label}\nNo stream configured`;
             }
             v.muted = true;
             v.loop = false;
             v.playsInline = true;
             v.srcObject = null;
-            v.src = url;
+            v.removeAttribute("src");
           });
 
+          let expected = 0;
           let ok = 0;
-          for (const v of feeds) {
-            try {
-              await v.play();
+          for (let i = 0; i < feeds.length; i += 1) {
+            const v = feeds[i];
+            const url = urls[i] || "";
+            if (!url) continue;
+            expected += 1;
+            const played = await attachHlsToVideo(v, url);
+            if (played) {
               ok += 1;
-            } catch {
-              /* missing gateway, CORS, codec, or autoplay */
-            }
-          }
-
-          if (ok === feeds.length) {
-            feeds.forEach((v) => {
               v.dataset.ready = "true";
               const tile = v.closest(".tile");
               if (tile) tile.dataset.ready = "true";
-            });
+            }
+          }
+
+          if (expected === 0) {
+            startBtn.disabled = false;
+            setOverlayLabel("network");
+            showOverlay();
+          } else if (ok === expected) {
             hideOverlay();
             startBtn.disabled = false;
           } else {
+            stopHlsPlayers();
             clearTileReady();
             startBtn.disabled = false;
             setOverlayLabel("network");
             showOverlay();
           }
         } catch {
+          stopHlsPlayers();
           clearTileReady();
           startBtn.disabled = false;
           setOverlayLabel("network");
@@ -562,8 +647,14 @@
 
       if (bc) {
         bc.addEventListener("message", (ev) => {
-          if (!ev.data || ev.data.type !== "state" || !ev.data.payload) return;
-          applyRemoteState(ev.data.payload);
+          if (!ev.data) return;
+          if (ev.data.type === "state" && ev.data.payload) {
+            applyRemoteState(ev.data.payload);
+            return;
+          }
+          if (ev.data.type === "cameras_updated" && runtimeState.mode === "network") {
+            applyMediaFromState();
+          }
         });
       }
 

@@ -6,18 +6,6 @@
   const CZTV_CHANNEL = "cztv-control";
   const CZTV_STORAGE_KEY = "cztv_state_v1";
 
-  /**
-   * Placeholder URLs for four IP cameras (one per tile). Replace with your LAN gateway
-   * (e.g. HLS .m3u8 from go2rtc/MediaMTX/ffmpeg); browsers cannot play Tapo RTSP directly.
-   * @type {string[]}
-   */
-  const NETWORK_STREAM_STUBS = [
-    "http://192.168.1.201:8888/cam1/index.m3u8",
-    "http://192.168.1.202:8888/cam2/index.m3u8",
-    "http://192.168.1.203:8888/cam3/index.m3u8",
-    "http://192.168.1.204:8888/cam4/index.m3u8",
-  ];
-
   /** @type {Record<string, string[]>} presetId -> four URLs for tiles 1–4 */
   const PRESETS = {
     default: [
@@ -75,7 +63,6 @@
     CHANNEL: CZTV_CHANNEL,
     STORAGE_KEY: CZTV_STORAGE_KEY,
     PRESETS,
-    NETWORK_STREAM_STUBS,
     defaultState,
     readState,
     writeState,

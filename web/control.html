@@ -25,7 +25,7 @@
         line-height: 1.5;
       }
       .wrap {
-        max-width: 560px;
+        max-width: 640px;
         margin: 0 auto;
         padding: 24px 20px 48px;
       }
@@ -57,7 +57,8 @@
         font-size: 0.85rem;
         margin-bottom: 6px;
       }
-      input[type="text"] {
+      input[type="text"],
+      input[type="password"] {
         width: 100%;
         padding: 10px 12px;
         border-radius: 8px;
@@ -102,6 +103,59 @@
       a {
         color: var(--accent);
       }
+      button {
+        font: inherit;
+        padding: 10px 14px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.14);
+        background: rgba(91, 140, 255, 0.18);
+        color: var(--text);
+        cursor: pointer;
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      .status {
+        margin-top: 10px;
+        font-size: 0.85rem;
+      }
+      .status.ok {
+        color: #7ddea2;
+      }
+      .status.err {
+        color: #ff9b9b;
+      }
+      .subhead {
+        font-size: 0.8rem;
+        color: var(--muted);
+        margin: 18px 0 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .cam-row {
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-radius: 10px;
+        padding: 14px;
+        margin-bottom: 12px;
+        background: rgba(0, 0, 0, 0.15);
+      }
+      .cam-row h3 {
+        margin: 0 0 10px;
+        font-size: 0.9rem;
+      }
+      .cam-row label {
+        margin-top: 10px;
+      }
+      .cam-row label:first-of-type {
+        margin-top: 0;
+      }
+      .inline-2 {
+        display: grid;
+        grid-template-columns: 1fr 120px;
+        gap: 10px;
+        margin-top: 10px;
+      }
     </style>
   </head>
   <body>
@@ -137,13 +191,33 @@
           </label>
           <label class="choice">
             <input type="radio" name="mode" value="network" />
-            Network cameras (stub)
+            Network cameras
           </label>
         </div>
         <p class="hint">
-          Recorded mode uses files under <code>/media/</code> (served from the repo <code>media/</code> folder). Network mode loads four stub gateway URLs from
-          <code>cztv-shared.js</code> (HLS-style placeholders; swap for your RTSP→HLS/WebRTC bridge later).
+          Recorded mode uses files under <code>/media/</code>. Network mode pulls RTSP from your Wi-Fi camera via the local server (ffmpeg → HLS).
         </p>
+      </section>
+
+      <section id="networkSection">
+        <h2>Network cameras (RTSP)</h2>
+        <p class="hint" style="margin-top: 0">
+          One row per wall tile. Shared credentials apply to all cameras (typical for Tapo). Leave a tile’s host empty to skip it.
+        </p>
+
+        <p class="subhead">Shared credentials</p>
+        <label for="sharedUser">Username</label>
+        <input id="sharedUser" type="text" autocomplete="off" placeholder="Camera account username" />
+        <label for="sharedPass" style="margin-top: 12px">Password</label>
+        <input id="sharedPass" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved password" />
+
+        <p class="subhead">Tiles 1–4</p>
+        <div id="cameraRows"></div>
+
+        <div class="row" style="margin-top: 14px">
+          <button id="btnSaveCameras" type="button">Save camera settings</button>
+        </div>
+        <p id="cameraStatus" class="status" hidden></p>
       </section>
 
       <section id="presetSection">
@@ -165,6 +239,45 @@
 
       const elParticipant = document.getElementById("participantId");
       const elPreset = document.getElementById("preset");
+      const elCameraRows = document.getElementById("cameraRows");
+      const elSharedUser = document.getElementById("sharedUser");
+      const elSharedPass = document.getElementById("sharedPass");
+      const btnSaveCameras = document.getElementById("btnSaveCameras");
+      const elCameraStatus = document.getElementById("cameraStatus");
+      const TILE_COUNT = 4;
+      let cameraDraft = null;
+
+      const tileFields = [];
+
+      function buildCameraRows() {
+        elCameraRows.innerHTML = "";
+        tileFields.length = 0;
+        for (let i = 0; i < TILE_COUNT; i += 1) {
+          const row = document.createElement("div");
+          row.className = "cam-row";
+          row.innerHTML = `
+            <h3>Tile ${i + 1}</h3>
+            <label>Label</label>
+            <input type="text" data-field="label" autocomplete="off" placeholder="e.g. Indoor left" />
+            <div class="inline-2">
+              <div>
+                <label>IP / host</label>
+                <input type="text" data-field="host" autocomplete="off" placeholder="e.g. 172.20.10.2" />
+              </div>
+              <div>
+                <label>RTSP path</label>
+                <input type="text" data-field="path" autocomplete="off" placeholder="/stream1" />
+              </div>
+            </div>
+          `;
+          elCameraRows.appendChild(row);
+          tileFields.push({
+            label: row.querySelector('[data-field="label"]'),
+            host: row.querySelector('[data-field="host"]'),
+            path: row.querySelector('[data-field="path"]'),
+          });
+        }
+      }
 
       function getMode() {
         const r = document.querySelector('input[name="mode"]:checked');
@@ -180,6 +293,111 @@
         });
         elPreset.value = s.preset in PRESETS ? s.preset : "default";
         elPreset.disabled = s.mode !== "recorded";
+        document.getElementById("networkSection").style.display = s.mode === "network" ? "block" : "none";
+      }
+
+      function setCameraStatus(text, ok) {
+        if (!text) {
+          elCameraStatus.hidden = true;
+          elCameraStatus.textContent = "";
+          elCameraStatus.className = "status";
+          return;
+        }
+        elCameraStatus.hidden = false;
+        elCameraStatus.textContent = text;
+        elCameraStatus.className = ok ? "status ok" : "status err";
+      }
+
+      function applyCameraDraft(cfg) {
+        cameraDraft = cfg;
+        const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
+        const tileMap = Array.isArray(cfg.tileMap) ? cfg.tileMap : [0, 1, 2, 3];
+
+        const mirrored =
+          cameras.length === 1 &&
+          tileMap.length === TILE_COUNT &&
+          tileMap.every((idx) => idx === tileMap[0]);
+
+        for (let i = 0; i < TILE_COUNT; i += 1) {
+          let cam = {};
+          if (mirrored) {
+            cam = i === 0 ? cameras[0] : cameras[i] || {};
+          } else {
+            const mapIdx = tileMap[i] ?? i;
+            cam = cameras[mapIdx] || cameras[i] || {};
+          }
+          tileFields[i].label.value = cam.label || `Camera ${i + 1}`;
+          tileFields[i].host.value = cam.host || "";
+          tileFields[i].path.value = cam.path || "/stream1";
+        }
+
+        const credCam = cameras.find((c) => c.username) || cameras[0] || {};
+        elSharedUser.value = credCam.username || "";
+        elSharedPass.value = "";
+        elSharedPass.placeholder = cameras.some((c) => c.hasPassword)
+          ? "Saved (leave blank to keep)"
+          : "Camera account password";
+
+        if (!cfg.ffmpeg) {
+          setCameraStatus("ffmpeg not found on server PATH — install FFmpeg and restart.", false);
+        } else {
+          setCameraStatus("", true);
+        }
+      }
+
+      function buildCameraPayload() {
+        const username = elSharedUser.value.trim();
+        const password = elSharedPass.value;
+        const cameras = tileFields.map((row, i) => ({
+          id: `cam${i + 1}`,
+          label: row.label.value.trim() || `Camera ${i + 1}`,
+          host: row.host.value.trim(),
+          path: row.path.value.trim() || "/stream1",
+          username,
+          password,
+        }));
+        return { cameras, tileMap: [0, 1, 2, 3] };
+      }
+
+      async function loadCameras() {
+        try {
+          const res = await fetch("/api/cameras");
+          const cfg = await res.json();
+          applyCameraDraft(cfg);
+        } catch {
+          setCameraStatus("Could not load camera settings from server.", false);
+        }
+      }
+
+      async function saveCameras() {
+        btnSaveCameras.disabled = true;
+        setCameraStatus("Saving…", true);
+        const body = buildCameraPayload();
+        try {
+          const res = await fetch("/api/cameras", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          const cfg = await res.json();
+          if (!res.ok || !cfg.ok) {
+            setCameraStatus(cfg.error || "Save failed.", false);
+            return;
+          }
+          applyCameraDraft(cfg);
+          setCameraStatus("Saved. Wall will reload network streams if that mode is active.", true);
+          if (bc) {
+            try {
+              bc.postMessage({ type: "cameras_updated" });
+            } catch {
+              /* ignore */
+            }
+          }
+        } catch {
+          setCameraStatus("Save failed — is the Python server running?", false);
+        } finally {
+          btnSaveCameras.disabled = false;
+        }
       }
 
       function broadcast(next) {
@@ -213,6 +431,7 @@
       }
 
       function init() {
+        buildCameraRows();
         fillPresetOptions();
         const s = readState();
         setUIFromState(s);
@@ -234,6 +453,12 @@
         elPreset.addEventListener("change", () => {
           pushUpdate({ preset: elPreset.value });
         });
+
+        btnSaveCameras.addEventListener("click", () => {
+          saveCameras();
+        });
+
+        loadCameras();
 
         if (bc) {
           bc.addEventListener("message", (ev) => {

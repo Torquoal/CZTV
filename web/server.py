@@ -15,7 +15,17 @@ MEDIA_MIME = {
     ".mp4": "video/mp4",
     ".webm": "video/webm",
     ".mov": "video/quicktime",
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".ts": "video/mp2t",
 }
+
+from rtsp_bridge import (
+    ensure_stream,
+    load_config,
+    public_config,
+    resolve_hls_file,
+    save_config,
+)
 
 
 def utc_iso() -> str:
@@ -128,9 +138,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return candidate
         return None
 
-    def _send_health_json(self, send_body: bool = True) -> None:
-        import json as _json
+    def _send_json(self, payload: dict, status: int = 200, send_body: bool = True) -> None:
+        body = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if send_body:
+            self.wfile.write(body)
 
+    def _send_health_json(self, send_body: bool = True) -> None:
         jungle = [MEDIA_ROOT / "jungle.mp4", (ROOT / "media" / "jungle.mp4").resolve()]
         header_preview = None
         if LOG_FILE.exists() and LOG_FILE.stat().st_size > 0:
@@ -147,17 +164,63 @@ class Handler(SimpleHTTPRequestHandler):
             "log_header_first_line": header_preview,
             "expected_csv_header": EXPECTED_CSV_HEADER,
         }
-        body = _json.dumps(data, indent=2).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        if send_body:
-            self.wfile.write(body)
+        self._send_json(data, send_body=send_body)
+
+    def _hls_file_for_request(self) -> Path | None:
+        p = self._request_path_only()
+        if not p.startswith("/stream/"):
+            return None
+        parts = [x for x in p.split("/") if x]
+        if len(parts) < 3 or parts[0] != "stream":
+            return None
+        cam_id = parts[1]
+        filename = parts[-1]
+        return resolve_hls_file(cam_id, filename)
+
+    def _send_hls_file(self, file_path: Path, only_head: bool) -> None:
+        ext = file_path.suffix.lower()
+        ctype = MEDIA_MIME.get(ext) or mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
+        try:
+            st = file_path.stat()
+        except OSError:
+            self.send_error(404)
+            return
+        try:
+            f = file_path.open("rb")
+        except OSError:
+            self.send_error(404)
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(st.st_size))
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            if only_head:
+                return
+            shutil.copyfileobj(f, self.wfile)
+        finally:
+            f.close()
 
     def do_GET(self) -> None:
-        if self._request_path_only() == "/__cztv__/health":
+        path_only = self._request_path_only()
+        if path_only == "/__cztv__/health":
             self._send_health_json(send_body=True)
+            return
+        if path_only == "/api/cameras":
+            self._send_json(public_config(load_config()))
+            return
+        if path_only.startswith("/stream/") and path_only.endswith("/index.m3u8"):
+            parts = [x for x in path_only.split("/") if x]
+            if len(parts) >= 3:
+                cam_id = parts[1]
+                result = ensure_stream(cam_id)
+                if not result.get("ok"):
+                    self._send_json({"ok": False, **result}, status=503)
+                    return
+        hls_file = self._hls_file_for_request()
+        if hls_file:
+            self._send_hls_file(hls_file, only_head=False)
             return
         mp = self._media_file_for_request()
         if mp:
@@ -166,8 +229,13 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_HEAD(self) -> None:
-        if self._request_path_only() == "/__cztv__/health":
+        path_only = self._request_path_only()
+        if path_only == "/__cztv__/health":
             self._send_health_json(send_body=False)
+            return
+        hls_file = self._hls_file_for_request()
+        if hls_file:
+            self._send_hls_file(hls_file, only_head=True)
             return
         mp = self._media_file_for_request()
         if mp:
@@ -201,6 +269,23 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/cameras":
+            length = int(self.headers.get("content-length", "0") or "0")
+            raw = self.rfile.read(length) if length > 0 else b""
+            try:
+                body = json.loads(raw.decode("utf-8") if raw else "{}")
+            except Exception:
+                self.send_response(400)
+                self.end_headers()
+                self.wfile.write(b"Bad JSON")
+                return
+            try:
+                saved = save_config(body)
+                self._send_json({"ok": True, **public_config(saved)})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=500)
+            return
+
         if parsed.path != "/log":
             self.send_response(404)
             self.end_headers()

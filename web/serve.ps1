@@ -28,6 +28,19 @@ Write-Info "Open:"
 Write-Host "  http://localhost:$Port/"
 Write-Host ""
 
+$ffmpegLocal = Get-ChildItem -Path (Join-Path $scriptDir ".tools") -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($ffmpegLocal) {
+  $env:FFMPEG_PATH = $ffmpegLocal.FullName
+  Write-Info "Using bundled ffmpeg: $($ffmpegLocal.FullName)"
+} else {
+  $ffmpegCmd = Get-Command ffmpeg -ErrorAction SilentlyContinue
+  if ($ffmpegCmd) {
+    Write-Info "Using ffmpeg: $($ffmpegCmd.Source)"
+  } else {
+    Write-Warn "ffmpeg not found. Network camera mode needs ffmpeg (winget install Gyan.FFmpeg, or place ffmpeg under web\.tools)."
+  }
+}
+
 try {
   $python = Get-Command python -ErrorAction Stop
   Write-Info "Using Python: $($python.Source)"
