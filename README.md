@@ -6,19 +6,9 @@ This repo starts with a minimal UI prototype. Next we’ll integrate live camera
 
 ## Constraints / assumptions
 
-- Cameras likely connect over **zoo Wi‑Fi** (30–80 m, complex geometry).
+- Cameras likely connect over **Wi‑Fi** (30–80 m, complex geometry).
 - Prefer **no extra bridge hardware/services** beyond the central client device.
 - Central client can be a **kiosk app** or a **web app** (we’ll choose based on what the cameras can output).
-
-## About the TP‑Link Tapo C420 (important)
-
-The **Tapo C420** is a **battery camera**, and typically does **not** expose continuous **RTSP/ONVIF** LAN streams (those features are usually on powered indoor models like the C200).
-
-That means:
-- it may still be great for **recording to SD/cloud** (later playback), but
-- it may *not* be usable as a simple “open 4 RTSP URLs” live wall **without** vendor/cloud integration.
-
-Next step is to confirm what the C420 actually exposes on your network (LAN live view, any local stream URLs, etc.).
 
 ## Prototype UI
 
