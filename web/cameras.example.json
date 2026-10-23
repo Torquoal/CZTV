@@ -2,7 +2,7 @@
   "cameras": [
     {
       "id": "cam1",
-      "label": "Camera 1",
+      "label": "Live camera 1",
       "host": "",
       "path": "/stream1",
       "username": "",
@@ -10,7 +10,7 @@
     },
     {
       "id": "cam2",
-      "label": "Camera 2",
+      "label": "Live camera 2",
       "host": "",
       "path": "/stream1",
       "username": "",
@@ -18,7 +18,7 @@
     },
     {
       "id": "cam3",
-      "label": "Camera 3",
+      "label": "Unused (video tile)",
       "host": "",
       "path": "/stream1",
       "username": "",
@@ -26,7 +26,7 @@
     },
     {
       "id": "cam4",
-      "label": "Camera 4",
+      "label": "Unused (video tile)",
       "host": "",
       "path": "/stream1",
       "username": "",

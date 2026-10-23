@@ -41,36 +41,59 @@ if ($ffmpegLocal) {
   }
 }
 
-try {
-  $python = Get-Command python -ErrorAction Stop
-  Write-Info "Using Python: $($python.Source)"
-  $env:PORT = "$Port"
-  python ".\server.py"
-  exit $LASTEXITCODE
-} catch {
-  Write-Warn "Python not found on PATH."
+function Test-RealPython([string]$exe, [string[]]$prefixArgs = @()) {
+  # Windows App Execution Aliases look like python.exe but only open the Store.
+  if ($exe -match '\\WindowsApps\\') { return $false }
+  try {
+    $null = & $exe @prefixArgs -c "import sys; print(sys.version)" 2>$null
+    return ($LASTEXITCODE -eq 0)
+  } catch {
+    return $false
+  }
 }
 
-try {
-  $py = Get-Command py -ErrorAction Stop
+function Resolve-PythonExe {
+  $candidates = @()
+  $candidates += @(Get-Command python -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
+  $candidates += @(
+    "$env:LOCALAPPDATA\Python\bin\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python314\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe"
+  )
+  foreach ($c in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
+    if ((Test-Path $c) -and (Test-RealPython $c)) { return $c }
+  }
+  return $null
+}
+
+$env:PORT = "$Port"
+
+$pythonExe = Resolve-PythonExe
+if ($pythonExe) {
+  Write-Info "Using Python: $pythonExe"
+  & $pythonExe ".\server.py"
+  exit $LASTEXITCODE
+}
+Write-Warn "Python not found on PATH (or only the Windows Store stub)."
+
+$py = Get-Command py -ErrorAction SilentlyContinue | Where-Object { $_.Source -notmatch '\\WindowsApps\\' } | Select-Object -First 1
+if ($py -and (Test-RealPython $py.Source @("-3"))) {
   Write-Info "Using Python Launcher: $($py.Source)"
-  $env:PORT = "$Port"
-  py ".\server.py"
+  & $py.Source -3 ".\server.py"
   exit $LASTEXITCODE
-} catch {
-  Write-Warn "Python Launcher (py) not found on PATH."
 }
+Write-Warn "Python Launcher (py) not found on PATH."
 
-try {
-  $node = Get-Command node -ErrorAction Stop
+$node = Get-Command node -ErrorAction SilentlyContinue
+if ($node) {
   Write-Info "Using Node: $($node.Source)"
-  $env:PORT = "$Port"
   Write-Info "Starting a tiny local server..."
-  node ".\server.js"
+  & $node.Source ".\server.js"
   exit $LASTEXITCODE
-} catch {
-  Write-Warn "Node not found on PATH."
 }
+Write-Warn "Node not found on PATH."
 
 Write-Err "Could not start a local server."
 Write-Host "Install Python (recommended) or Node, then re-run:"

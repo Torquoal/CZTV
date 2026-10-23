@@ -87,7 +87,7 @@
         display: grid;
       }
 
-      /* Researcher-only startup overlay (hidden once camera is live). */
+      /* Researcher-only startup overlay (hidden once media is playing). */
       #startOverlay[hidden] {
         display: none;
       }
@@ -111,31 +111,53 @@
         background: rgba(255, 255, 255, 0.08);
         cursor: pointer;
       }
+
+      /* Researcher coding HUD (small; not for chimps). */
+      #coderHud[hidden] {
+        display: none;
+      }
+      #coderHud {
+        position: fixed;
+        left: 10px;
+        bottom: 10px;
+        z-index: 50;
+        max-width: min(420px, 70vw);
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #d7e0f2;
+        font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        pointer-events: none;
+        opacity: 0.85;
+      }
+      #coderHud strong {
+        color: #fff;
+      }
     </style>
   </head>
   <body>
     <div class="app">
       <main>
         <div class="grid" id="grid">
-          <div class="tile" data-tile="1">
+          <div class="tile" data-slot="1">
             <div class="tileBody">
               <div class="placeholder"></div>
               <video class="feed" autoplay muted playsinline></video>
             </div>
           </div>
-          <div class="tile" data-tile="2">
+          <div class="tile" data-slot="2">
             <div class="tileBody">
               <div class="placeholder"></div>
               <video class="feed" autoplay muted playsinline></video>
             </div>
           </div>
-          <div class="tile" data-tile="3">
+          <div class="tile" data-slot="3">
             <div class="tileBody">
               <div class="placeholder"></div>
               <video class="feed" autoplay muted playsinline></video>
             </div>
           </div>
-          <div class="tile" data-tile="4">
+          <div class="tile" data-slot="4">
             <div class="tileBody">
               <div class="placeholder"></div>
               <video class="feed" autoplay muted playsinline></video>
@@ -149,21 +171,196 @@
       <button id="btnStart" type="button">Start</button>
     </div>
 
+    <div id="coderHud" hidden aria-live="polite">
+      <div>Active: <strong id="hudActive">—</strong></div>
+      <div>Present: <strong id="hudPresent">—</strong></div>
+      <div>Layout: <strong id="hudLayout">—</strong></div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script src="cztv-shared.js"></script>
+    <script src="cztv-shared.js?v=7"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
+      const coderHud = document.getElementById("coderHud");
 
-      const sessionId =
-        (typeof crypto !== "undefined" && crypto.randomUUID && crypto.randomUUID()) ||
-        `sess_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+      const CZTV = window.CZTV || {};
+      const CHANNEL = CZTV.CHANNEL || "cztv-control";
+      const makeSessionId =
+        CZTV.makeSessionId ||
+        (() => {
+          const d = new Date();
+          const pad = (n) => String(n).padStart(2, "0");
+          return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+        });
+      const sessionId = makeSessionId();
       const LOG_KEY = "cztv_usage_log_v1";
       const LOG_MAX = 2000;
 
-      const { CHANNEL, readState, writeState, PRESETS } = window.CZTV;
+      const readState =
+        CZTV.readState ||
+        (() => ({
+          participantId: "",
+          presentIds: [],
+          randomizeLayout: true,
+          showCoderHud: false,
+          tapCooldownMs: 2000,
+          edgeDeadZonePx: 48,
+          idleResetMs: 300000,
+        }));
+      const writeState = CZTV.writeState || ((s) => s);
+      const VIDEO_SETS = CZTV.VIDEO_SETS || {
+        familiar: ["/media/chimpvid.mp4", "/media/chimps2vid.mp4"],
+        unfamiliar: ["/media/jungle.mp4", "/media/crossing.mp4"],
+      };
+      const VIEW_LABELS = CZTV.VIEW_LABELS || {
+        live1: "live 1 BRU",
+        live2: "live 2 enclosure",
+        unfamiliar: "video 1 unfamiliar",
+        familiar: "video 2 familiar",
+      };
+      const liveCamerasPayload =
+        CZTV.liveCamerasPayload ||
+        (() => ({ cameras: [], tileMap: [0, 1, 2, 3] }));
+      const resolvePidHotkey = CZTV.resolvePidHotkey || (() => null);
+      const isTypingTarget = CZTV.isTypingTarget || (() => false);
+      const normalizePresentIds = CZTV.normalizePresentIds || ((ids) => (Array.isArray(ids) ? ids : []));
+      const normalizeLayoutOrder =
+        CZTV.normalizeLayoutOrder ||
+        ((order) =>
+          Array.isArray(order) && order.length === 4
+            ? order
+            : ["live1", "live2", "familiar", "unfamiliar"]);
+      const buildLayoutOrder =
+        CZTV.buildLayoutOrder ||
+        ((randomize) => {
+          const order = ["live1", "live2", "familiar", "unfamiliar"];
+          if (!randomize) return order;
+          for (let i = order.length - 1; i > 0; i -= 1) {
+            const j = Math.floor(Math.random() * (i + 1));
+            const tmp = order[i];
+            order[i] = order[j];
+            order[j] = tmp;
+          }
+          return order;
+        });
 
-      /** @type {{ participantId: string, mode: string, preset: string }} */
+      /** @type {{ participantId: string, presentIds: string[], randomizeLayout: boolean }} */
       let runtimeState = readState();
+      /** @type {string[]} screen slots 0–3 → view ids for this wall session */
+      let layoutOrder = normalizeLayoutOrder(
+        buildLayoutOrder(runtimeState.randomizeLayout !== false)
+      );
+
+      const hudActive = document.getElementById("hudActive");
+      const hudPresent = document.getElementById("hudPresent");
+      const hudLayout = document.getElementById("hudLayout");
+
+      function updateCoderHud() {
+        if (coderHud) coderHud.hidden = runtimeState.showCoderHud !== true;
+        if (hudActive) hudActive.textContent = runtimeState.participantId || "—";
+        if (hudPresent) {
+          const list = normalizePresentIds(runtimeState.presentIds);
+          hudPresent.textContent = list.length ? list.join(" ") : "—";
+        }
+        if (hudLayout) {
+          const mode = runtimeState.randomizeLayout !== false ? "random" : "fixed";
+          hudLayout.textContent = `${mode}: ${layoutOrder
+            .map((v, i) => `${i + 1}=${contentLabelForView(v)}`)
+            .join(" · ")}`;
+        }
+      }
+
+      let lastTapAt = 0;
+      let lastActivityAt = Date.now();
+
+      function noteActivity() {
+        lastActivityAt = Date.now();
+      }
+
+      function tapCooldownMs() {
+        const n = Number(runtimeState.tapCooldownMs);
+        return Number.isFinite(n) ? Math.max(0, n) : 2000;
+      }
+
+      function edgeDeadZonePx() {
+        const n = Number(runtimeState.edgeDeadZonePx);
+        return Number.isFinite(n) ? Math.max(0, n) : 48;
+      }
+
+      function idleResetMs() {
+        const n = Number(runtimeState.idleResetMs);
+        return Number.isFinite(n) ? Math.max(10000, n) : 300000;
+      }
+
+      function inCooldown() {
+        return Date.now() - lastTapAt < tapCooldownMs();
+      }
+
+      function markTap() {
+        lastTapAt = Date.now();
+        noteActivity();
+      }
+
+      /** Ignore taps near tile edges (reduces accidental neighbour selection). */
+      function isInTileDeadZone(tileEl, clientX, clientY) {
+        const inset = edgeDeadZonePx();
+        if (!inset || clientX == null || clientY == null) return false;
+        const r = tileEl.getBoundingClientRect();
+        if (r.width <= inset * 2 || r.height <= inset * 2) return false;
+        return (
+          clientX < r.left + inset ||
+          clientX > r.right - inset ||
+          clientY < r.top + inset ||
+          clientY > r.bottom - inset
+        );
+      }
+
+      function applyLayoutToDom() {
+        tiles.forEach((tileEl, i) => {
+          const view = layoutOrder[i] || `unknown${i + 1}`;
+          tileEl.dataset.slot = String(i + 1);
+          tileEl.dataset.view = view;
+          tileEl.dataset.tile = String(i + 1);
+        });
+      }
+
+      function slotIndexForView(viewId) {
+        return layoutOrder.indexOf(viewId);
+      }
+
+      function contentLabelForView(viewId) {
+        return VIEW_LABELS[viewId] || viewId || "";
+      }
+
+      function tileLogFields(tileEl) {
+        if (!tileEl) {
+          return { tile: "", content: "", viewId: "" };
+        }
+        const slot = tileEl.getAttribute("data-slot") || tileEl.getAttribute("data-tile") || "";
+        const viewId = tileEl.getAttribute("data-view") || "";
+        const content = contentLabelForView(viewId);
+        return {
+          // CSV columns: tile = position 1–4; content = "live 1 BRU" etc.
+          tile: slot,
+          content,
+          viewId,
+        };
+      }
+
+      function broadcastLayout() {
+        if (!bc) return;
+        try {
+          bc.postMessage({
+            type: "layout",
+            payload: {
+              layoutOrder: layoutOrder.slice(),
+              randomizeLayout: runtimeState.randomizeLayout !== false,
+            },
+          });
+        } catch {
+          /* ignore */
+        }
+      }
 
       let bc = null;
       try {
@@ -233,22 +430,58 @@
         }
       });
 
+      /** What is on screen right now: "wall" (4-up) or a content label (maximized view). */
+      function currentScreenLabel() {
+        if (!document.body.classList.contains("maximized")) return "wall";
+        const active = document.querySelector('.tile[data-max="true"]');
+        if (!active) return "wall";
+        return tileLogFields(active).content || "wall";
+      }
+
+      function eventNameFor(type, reason) {
+        if (type === "tile_maximize") return "view_selected";
+        if (type === "tile_minimize") {
+          if (reason === "idle") return "idle_timeout";
+          if (reason === "esc") return "esc_deselect";
+          return "view_deselected";
+        }
+        if (type === "video_clip_start") return "clip_start";
+        if (type === "live_tile_ready") return "live_ready";
+        if (type === "active_user_set") return "active_user_set";
+        if (type === "presence_on") return "presence_on";
+        if (type === "presence_off") return "presence_off";
+        if (type === "layout_assigned") return "layout_assigned";
+        if (type === "wall_start") return "wall_start";
+        if (type === "app_start") return "app_start";
+        return type || "";
+      }
+
       function logContext() {
+        const presentIds = normalizePresentIds(runtimeState.presentIds);
         return {
+          // participantID = active user; present = current area roster (updates on join/leave)
           participantId: runtimeState.participantId || "",
-          mode: runtimeState.mode,
-          preset: runtimeState.preset,
+          present: presentIds.join(";"),
+          screen: currentScreenLabel(),
+          randomizeLayout: runtimeState.randomizeLayout !== false,
+          layoutOrder: layoutOrder.join(";"),
+          source: "wall",
         };
       }
 
       function logEvent(type, details) {
+        const reason = details && details.reason != null ? details.reason : "";
         const entry = {
           ts: nowIso(),
           sessionId,
           type,
+          event: eventNameFor(type, reason),
           ...logContext(),
           ...details,
         };
+        // Prefer explicit screen from details (after a layout change), else current.
+        if (!entry.screen) entry.screen = currentScreenLabel();
+        if (!entry.event) entry.event = eventNameFor(type, entry.reason || reason);
         const next = readLog();
         next.push(entry);
         writeLog(next);
@@ -256,44 +489,137 @@
         enqueueForServer(entry);
       }
 
-      logEvent("app_start", { href: location.href });
+      applyLayoutToDom();
+      updateCoderHud();
+      logEvent("app_start", { href: location.href, screen: "wall" });
+      logEvent("layout_assigned", { screen: "wall" });
+      broadcastLayout();
 
       function setMax(tileEl, reason) {
         tiles.forEach((t) => t.setAttribute("data-max", t === tileEl ? "true" : "false"));
         document.body.classList.add("maximized");
+        noteActivity();
+        const fields = tileLogFields(tileEl);
         logEvent("tile_maximize", {
-          tile: tileEl.getAttribute("data-tile"),
+          ...fields,
           reason,
+          screen: fields.content || "wall",
+          event: "view_selected",
         });
       }
 
       function setFourUp(reason) {
         const active = document.querySelector('.tile[data-max="true"]');
+        if (!document.body.classList.contains("maximized") && !active) return;
+        const fields = tileLogFields(active);
         tiles.forEach((t) => t.removeAttribute("data-max"));
         document.body.classList.remove("maximized");
+        noteActivity();
+        const event =
+          reason === "idle" ? "idle_timeout" : reason === "esc" ? "esc_deselect" : "view_deselected";
         logEvent("tile_minimize", {
-          tile: active ? active.getAttribute("data-tile") : null,
+          ...fields,
           reason,
+          screen: "wall",
+          event,
         });
       }
 
+      function handleTilePointer(tileEl, clientX, clientY) {
+        if (inCooldown()) return;
+        // When maximized, whole screen is one tile — no edge dead-zone.
+        if (!document.body.classList.contains("maximized")) {
+          if (isInTileDeadZone(tileEl, clientX, clientY)) return;
+        }
+        markTap();
+        if (document.body.classList.contains("maximized")) setFourUp("tap");
+        else setMax(tileEl, "tap");
+      }
+
       tiles.forEach((t) => {
-        t.addEventListener("click", () => {
-          if (document.body.classList.contains("maximized")) return setFourUp("tap");
-          return setMax(t, "tap");
-        });
+        t.addEventListener(
+          "pointerup",
+          (e) => {
+            if (e.button != null && e.button !== 0) return;
+            handleTilePointer(t, e.clientX, e.clientY);
+          },
+          { passive: true }
+        );
       });
 
+      setInterval(() => {
+        if (!document.body.classList.contains("maximized")) return;
+        if (Date.now() - lastActivityAt < idleResetMs()) return;
+        setFourUp("idle");
+      }, 5000);
+
+      function broadcastState(next) {
+        if (!bc) return;
+        try {
+          bc.postMessage({ type: "state", payload: next });
+        } catch {
+          /* ignore */
+        }
+      }
+
+      function setActiveUser(pid, reason, key) {
+        const prev = runtimeState.participantId || "";
+        if (prev === pid) {
+          updateCoderHud();
+          return runtimeState;
+        }
+        runtimeState = writeState({ ...runtimeState, participantId: pid });
+        updateCoderHud();
+        broadcastState(runtimeState);
+        noteActivity();
+        logEvent("active_user_set", {
+          reason,
+          message: `${prev || "—"}→${pid}`,
+        });
+        return runtimeState;
+      }
+
+      function togglePresence(pid, reason, key) {
+        const current = new Set(normalizePresentIds(runtimeState.presentIds));
+        const wasPresent = current.has(pid);
+        if (wasPresent) current.delete(pid);
+        else current.add(pid);
+        const presentIds = normalizePresentIds([...current]);
+        runtimeState = writeState({ ...runtimeState, presentIds });
+        updateCoderHud();
+        broadcastState(runtimeState);
+        noteActivity();
+        logEvent(wasPresent ? "presence_off" : "presence_on", {
+          reason,
+          message: pid,
+        });
+        return runtimeState;
+      }
+
       document.addEventListener("keydown", (e) => {
-        if (e.key === "Escape") setFourUp("esc");
+        if (e.key === "Escape") {
+          if (!inCooldown()) {
+            markTap();
+            setFourUp("esc");
+          }
+          return;
+        }
+        if (isTypingTarget(e.target)) return;
+        const hit = resolvePidHotkey(e);
+        if (!hit) return;
+        e.preventDefault();
+        noteActivity();
+        if (hit.shift) setActiveUser(hit.pid, "hotkey_shift", hit.key);
+        else togglePresence(hit.pid, "hotkey", hit.key);
       });
 
       const startOverlay = document.getElementById("startOverlay");
       const startBtn = document.getElementById("btnStart");
       const feeds = Array.from(document.querySelectorAll("video.feed"));
-      let activeStreams = [];
       let hlsPlayers = [];
+      let playlistHandlers = [];
       let mediaInFlight = false;
+      let wallStarted = false;
 
       function stopHlsPlayers() {
         hlsPlayers.forEach((h) => {
@@ -304,6 +630,57 @@
           }
         });
         hlsPlayers = [];
+      }
+
+      function clearPlaylists() {
+        playlistHandlers.forEach(({ video, onEnded }) => {
+          try {
+            video.removeEventListener("ended", onEnded);
+          } catch {
+            /* ignore */
+          }
+        });
+        playlistHandlers = [];
+      }
+
+      function setPlaceholder(tileIndex, text) {
+        const v = feeds[tileIndex];
+        const ph = v?.closest(".tileBody")?.querySelector(".placeholder");
+        if (ph) ph.textContent = text || "";
+      }
+
+      function markTileReady(tileIndex, ready) {
+        const v = feeds[tileIndex];
+        if (!v) return;
+        const tile = v.closest(".tile");
+        if (ready) {
+          v.dataset.ready = "true";
+          if (tile) tile.dataset.ready = "true";
+        } else {
+          v.removeAttribute("data-ready");
+          if (tile) tile.removeAttribute("data-ready");
+        }
+      }
+
+      function clearAllFeeds() {
+        stopHlsPlayers();
+        clearPlaylists();
+        feeds.forEach((v, i) => {
+          try {
+            v.pause();
+          } catch {
+            /* ignore */
+          }
+          v.removeAttribute("src");
+          v.srcObject = null;
+          try {
+            v.load();
+          } catch {
+            /* ignore */
+          }
+          markTileReady(i, false);
+          setPlaceholder(i, "");
+        });
       }
 
       function attachHlsToVideo(video, url) {
@@ -345,14 +722,8 @@
         });
       }
 
-      function setOverlayLabel(mode) {
-        if (mode === "recorded") startBtn.textContent = "Tap to play";
-        else if (mode === "network") startBtn.textContent = "Load network streams";
-        else startBtn.textContent = "Start camera";
-      }
-
       function showOverlay() {
-        setOverlayLabel(runtimeState.mode);
+        startBtn.textContent = "Start";
         startOverlay.hidden = false;
       }
 
@@ -360,289 +731,196 @@
         startOverlay.hidden = true;
       }
 
-      function clearRecordedVideos() {
-        feeds.forEach((v) => {
-          try {
-            v.pause();
-          } catch {
-            /* ignore */
-          }
-          v.removeAttribute("src");
-          v.srcObject = null;
-          try {
-            v.load();
-          } catch {
-            /* ignore */
-          }
-          const ph = v.closest(".tileBody")?.querySelector(".placeholder");
-          if (ph) ph.textContent = "";
+      async function pushLiveCamerasFromScript() {
+        const body = liveCamerasPayload();
+        const res = await fetch("/api/cameras", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
         });
-      }
-
-      function clearTileReady() {
-        feeds.forEach((v) => {
-          v.removeAttribute("data-ready");
-          const tile = v.closest(".tile");
-          if (tile) tile.removeAttribute("data-ready");
-        });
-      }
-
-      function attachStreamToTiles(stream, tileIndexes) {
-        tileIndexes.forEach((idx) => {
-          const v = feeds[idx];
-          if (!v) return;
-          v.srcObject = stream;
-          v.dataset.ready = "true";
-          v.closest(".tile").dataset.ready = "true";
-        });
-      }
-
-      function stopAllStreams() {
-        activeStreams.forEach((s) => s.getTracks().forEach((t) => t.stop()));
-        activeStreams = [];
-      }
-
-      async function getVideoInputs() {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        return devices.filter((d) => d.kind === "videoinput");
-      }
-
-      async function startLiveCameras() {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          showOverlay();
-          return;
+        const cfg = await res.json();
+        if (!res.ok || cfg.ok === false) {
+          throw new Error(cfg.error || "Failed to apply script camera config");
         }
-        startBtn.disabled = true;
+        return cfg;
+      }
+
+      async function startLiveTiles() {
+        const liveViews = ["live1", "live2"];
+        let cfg;
         try {
-          stopHlsPlayers();
-          clearRecordedVideos();
-          clearTileReady();
-
-          const warmupStream = await navigator.mediaDevices.getUserMedia({
-            video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-            audio: false,
-          });
-          warmupStream.getTracks().forEach((t) => t.stop());
-
-          const inputs = await getVideoInputs();
-
-          if (inputs.length >= 2) {
-            const [camA, camB] = inputs;
-            const [streamA, streamB] = await Promise.all([
-              navigator.mediaDevices.getUserMedia({
-                video: { deviceId: { exact: camA.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
-                audio: false,
-              }),
-              navigator.mediaDevices.getUserMedia({
-                video: { deviceId: { exact: camB.deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } },
-                audio: false,
-              }),
-            ]);
-            activeStreams = [streamA, streamB];
-            attachStreamToTiles(streamA, [0, 1]);
-            attachStreamToTiles(streamB, [2, 3]);
-          } else {
-            const stream = await navigator.mediaDevices.getUserMedia({
-              video: { width: { ideal: 1280 }, height: { ideal: 720 } },
-              audio: false,
-            });
-            activeStreams = [stream];
-            attachStreamToTiles(stream, [0, 1, 2, 3]);
-          }
-
-          hideOverlay();
+          cfg = await pushLiveCamerasFromScript();
         } catch (err) {
-          stopAllStreams();
-          clearTileReady();
-          startBtn.disabled = false;
-          showOverlay();
-        }
-      }
-
-      async function startRecordedVideos() {
-        startBtn.disabled = true;
-        try {
-          stopAllStreams();
-          stopHlsPlayers();
-          clearRecordedVideos();
-          clearTileReady();
-
-          const urls = PRESETS[runtimeState.preset] || PRESETS.default;
-          feeds.forEach((v, i) => {
-            v.muted = true;
-            v.loop = true;
-            v.playsInline = true;
-            v.srcObject = null;
-            v.src = urls[i] || "";
-          });
-
-          let ok = 0;
-          for (const v of feeds) {
-            try {
-              await v.play();
-              ok += 1;
-            } catch {
-              /* autoplay policy or missing file */
-            }
-          }
-
-          if (ok === feeds.length) {
-            feeds.forEach((v) => {
-              v.dataset.ready = "true";
-              const tile = v.closest(".tile");
-              if (tile) tile.dataset.ready = "true";
-            });
-            hideOverlay();
-            startBtn.disabled = false;
-          } else {
-            clearTileReady();
-            startBtn.disabled = false;
-            setOverlayLabel("recorded");
-            showOverlay();
-          }
-        } catch {
-          clearTileReady();
-          startBtn.disabled = false;
-          setOverlayLabel("recorded");
-          showOverlay();
-        }
-      }
-
-      async function startNetworkStreams() {
-        startBtn.disabled = true;
-        try {
-          stopAllStreams();
-          stopHlsPlayers();
-          clearRecordedVideos();
-          clearTileReady();
-
           const res = await fetch("/api/cameras");
-          const cfg = await res.json();
-          const urls = Array.isArray(cfg.tileUrls) ? cfg.tileUrls : [];
-          const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
-
-          if (!cfg.ffmpeg) {
-            feeds.forEach((v, i) => {
-              const ph = v.closest(".tileBody")?.querySelector(".placeholder");
-              if (ph) {
-                ph.textContent =
-                  `Network camera ${i + 1}\nffmpeg not found — install FFmpeg and restart the server.`;
-              }
-            });
-            startBtn.disabled = false;
-            setOverlayLabel("network");
-            showOverlay();
-            return;
-          }
-
-          const tileMap = Array.isArray(cfg.tileMap) ? cfg.tileMap : [0, 1, 2, 3];
-
-          feeds.forEach((v, i) => {
-            const url = urls[i] || "";
-            const cam = cameras[tileMap[i] ?? i];
-            const ph = v.closest(".tileBody")?.querySelector(".placeholder");
-            if (ph) {
-              const label = cam?.label || `Camera ${i + 1}`;
-              const host = cam?.host ? `${cam.host}${cam.path || ""}` : "not configured";
-              ph.textContent = url ? `${label}\n${host}` : `${label}\nNo stream configured`;
-            }
-            v.muted = true;
-            v.loop = false;
-            v.playsInline = true;
-            v.srcObject = null;
-            v.removeAttribute("src");
+          cfg = await res.json();
+          logEvent("live_cameras_push_failed", {
+            message: String(err && err.message ? err.message : err),
           });
-
-          let expected = 0;
-          let ok = 0;
-          for (let i = 0; i < feeds.length; i += 1) {
-            const v = feeds[i];
-            const url = urls[i] || "";
-            if (!url) continue;
-            expected += 1;
-            const played = await attachHlsToVideo(v, url);
-            if (played) {
-              ok += 1;
-              v.dataset.ready = "true";
-              const tile = v.closest(".tile");
-              if (tile) tile.dataset.ready = "true";
-            }
-          }
-
-          if (expected === 0) {
-            startBtn.disabled = false;
-            setOverlayLabel("network");
-            showOverlay();
-          } else if (ok === expected) {
-            hideOverlay();
-            startBtn.disabled = false;
-          } else {
-            stopHlsPlayers();
-            clearTileReady();
-            startBtn.disabled = false;
-            setOverlayLabel("network");
-            showOverlay();
-          }
-        } catch {
-          stopHlsPlayers();
-          clearTileReady();
-          startBtn.disabled = false;
-          setOverlayLabel("network");
-          showOverlay();
         }
+
+        const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
+
+        if (!cfg.ffmpeg) {
+          liveViews.forEach((viewId) => {
+            const i = slotIndexForView(viewId);
+            if (i < 0) return;
+            setPlaceholder(i, "Live camera\nffmpeg not found — install FFmpeg and restart the server.");
+          });
+          return { expected: 0, ok: 0 };
+        }
+
+        let expected = 0;
+        let ok = 0;
+
+        for (let camIdx = 0; camIdx < liveViews.length; camIdx += 1) {
+          const viewId = liveViews[camIdx];
+          const tileIndex = slotIndexForView(viewId);
+          if (tileIndex < 0) continue;
+
+          const cam = cameras[camIdx] || {};
+          const url = cam.host ? `/stream/${cam.id}/index.m3u8` : "";
+          const label = cam.label || VIEW_LABELS[viewId] || viewId;
+          const host = cam.host ? `${cam.host}${cam.path || ""}` : "not configured";
+          setPlaceholder(tileIndex, url ? `${label}\n${host}` : `${label}\nNo stream configured`);
+
+          const v = feeds[tileIndex];
+          if (!v) continue;
+          v.muted = true;
+          v.loop = false;
+          v.playsInline = true;
+          v.srcObject = null;
+          v.removeAttribute("src");
+
+          if (!url) continue;
+          expected += 1;
+          const played = await attachHlsToVideo(v, url);
+          if (played) {
+            ok += 1;
+            markTileReady(tileIndex, true);
+            logEvent("live_tile_ready", {
+              tile: String(tileIndex + 1),
+              content: contentLabelForView(viewId),
+              viewId,
+            });
+          } else {
+            setPlaceholder(tileIndex, `${label}\nStream failed to start`);
+          }
+        }
+
+        return { expected, ok };
       }
 
-      async function applyMediaFromState() {
+      function startVideoPlaylist(tileIndex, setId) {
+        const urls = (VIDEO_SETS[setId] || []).filter(Boolean);
+        const label = VIEW_LABELS[setId] || setId;
+        const v = feeds[tileIndex];
+        if (!v) return false;
+
+        if (!urls.length) {
+          setPlaceholder(tileIndex, `${label}\nNo clips configured`);
+          return false;
+        }
+
+        setPlaceholder(tileIndex, label);
+        v.muted = true;
+        v.playsInline = true;
+        v.srcObject = null;
+        v.loop = urls.length === 1;
+
+        let idx = Math.floor(Math.random() * urls.length);
+
+        const playAt = (i) => {
+          const url = urls[((i % urls.length) + urls.length) % urls.length];
+          v.src = url;
+          logEvent("video_clip_start", {
+            tile: String(tileIndex + 1),
+            content: contentLabelForView(setId),
+            viewId: setId,
+            url,
+            clipIndex: i % urls.length,
+          });
+          return v.play().then(
+            () => {
+              markTileReady(tileIndex, true);
+              return true;
+            },
+            () => false
+          );
+        };
+
+        const onEnded = () => {
+          if (urls.length <= 1) return;
+          idx = (idx + 1) % urls.length;
+          playAt(idx);
+        };
+
+        v.addEventListener("ended", onEnded);
+        playlistHandlers.push({ video: v, onEnded });
+
+        return playAt(idx);
+      }
+
+      async function startVideoTiles() {
+        const videoViews = ["familiar", "unfamiliar"];
+        const results = await Promise.all(
+          videoViews.map(async (setId) => {
+            const tileIndex = slotIndexForView(setId);
+            if (tileIndex < 0) return false;
+            return Boolean(await startVideoPlaylist(tileIndex, setId));
+          })
+        );
+        return {
+          expected: results.length,
+          ok: results.filter(Boolean).length,
+        };
+      }
+
+      async function startWall() {
         if (mediaInFlight) return;
         mediaInFlight = true;
+        startBtn.disabled = true;
         try {
-          if (runtimeState.mode === "recorded") {
-            await startRecordedVideos();
-          } else if (runtimeState.mode === "network") {
-            await startNetworkStreams();
-          } else {
-            await startLiveCameras();
+          clearAllFeeds();
+          applyLayoutToDom();
+          const video = await startVideoTiles();
+          let live = { expected: 0, ok: 0 };
+          try {
+            live = await startLiveTiles();
+          } catch (liveErr) {
+            logEvent("live_tiles_error", {
+              message: String(liveErr && liveErr.message ? liveErr.message : liveErr),
+            });
+            ["live1", "live2"].forEach((viewId) => {
+              const i = slotIndexForView(viewId);
+              if (i >= 0) setPlaceholder(i, "Live camera\nCould not reach camera bridge");
+            });
           }
+          const anyReady = live.ok + video.ok > 0;
+          wallStarted = anyReady;
+          if (anyReady) {
+            hideOverlay();
+          } else {
+            showOverlay();
+          }
+          logEvent("wall_start", {
+            message: `live ${live.ok}/${live.expected}; video ${video.ok}/${video.expected}`,
+          });
+        } catch (err) {
+          clearAllFeeds();
+          wallStarted = false;
+          showOverlay();
+          logEvent("wall_start_error", { message: String(err && err.message ? err.message : err) });
         } finally {
+          startBtn.disabled = false;
           mediaInFlight = false;
         }
       }
 
-      function applyRemoteState(next, opts) {
-        const forceMedia = Boolean(opts && opts.forceMedia);
-        const prev = { ...runtimeState };
+      function applyRemoteState(next) {
+        // Originating tab already logged the hotkey/form change; just sync UI here.
+        // randomizeLayout changes apply on the next wall page load (not mid-session).
         runtimeState = writeState(next);
-
-        if (prev.participantId !== runtimeState.participantId) {
-          logEvent("participant_change", {
-            fromParticipantId: prev.participantId || "",
-            toParticipantId: runtimeState.participantId || "",
-          });
-        }
-
-        const modeChanged = prev.mode !== runtimeState.mode;
-        const needMedia =
-          forceMedia ||
-          modeChanged ||
-          (runtimeState.mode === "recorded" &&
-            (prev.mode !== "recorded" || prev.preset !== runtimeState.preset));
-
-        if (needMedia && modeChanged) {
-          logEvent("mode_change", {
-            fromMode: prev.mode,
-            toMode: runtimeState.mode,
-            preset: runtimeState.preset,
-          });
-        } else if (needMedia && !modeChanged && runtimeState.mode === "recorded" && prev.preset !== runtimeState.preset) {
-          logEvent("preset_change", {
-            fromPreset: prev.preset,
-            toPreset: runtimeState.preset,
-          });
-        }
-
-        if (needMedia) {
-          applyMediaFromState();
-        }
+        updateCoderHud();
       }
 
       if (bc) {
@@ -652,8 +930,8 @@
             applyRemoteState(ev.data.payload);
             return;
           }
-          if (ev.data.type === "cameras_updated" && runtimeState.mode === "network") {
-            applyMediaFromState();
+          if (ev.data.type === "cameras_updated" && wallStarted) {
+            startWall();
           }
         });
       }
@@ -668,11 +946,13 @@
       });
 
       startBtn.addEventListener("click", () => {
-        applyMediaFromState();
+        startWall();
       });
 
-      applyRemoteState(readState(), { forceMedia: true });
+      // Autoplay / HLS often needs a gesture; try once, show overlay if blocked.
+      startWall().then(() => {
+        if (!wallStarted) showOverlay();
+      });
     </script>
   </body>
 </html>
-

@@ -1,0 +1,9 @@
+Folder not found: C:\Users\smd56j\Documents\CZTV\web\..\media - recorded /media/*.mp4 may 404 unless files exist in web\media.
+Serving CZTV web prototype from:
+  C:\Users\smd56j\Documents\CZTV\web
+
+Open:
+  http://localhost:8000/
+
+Using bundled ffmpeg: C:\Users\smd56j\Documents\CZTV\web\.tools\ffmpeg-7.1.1-essentials_build\bin\ffmpeg.exe
+Using Python: C:\Users\smd56j\AppData\Local\Python\bin\python.exe

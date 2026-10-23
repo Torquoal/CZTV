@@ -16,13 +16,20 @@ const CSV_FIELDS = [
   "client_ts",
   "sessionId",
   "participantID",
-  "mode",
-  "preset",
-  "type",
+  "present",
+  "screen",
+  "event",
   "tile",
+  "content",
+  "viewId",
   "reason",
+  "url",
+  "clipIndex",
+  "layoutOrder",
+  "randomizeLayout",
+  "source",
+  "message",
   "href",
-  "meta",
 ];
 
 const EXPECTED_CSV_HEADER = CSV_FIELDS.join(",");
@@ -76,8 +83,16 @@ function migrateLogCsvIfNeeded() {
     const first = (raw.split(/\r?\n/)[0] || "").trim().replace(/^\uFEFF/, "");
     if (normalizeCsvHeaderLine(first) === EXPECTED_CSV_HEADER_NORM) return;
     const bak = path.join(logDir, `usage_before_schema_${utcIso().replace(/[:.]/g, "")}.csv`);
-    fs.renameSync(logFile, bak);
-    console.log(`Renamed old log to ${path.basename(bak)} (CSV schema updated).`);
+    try {
+      fs.renameSync(logFile, bak);
+      console.log(`Renamed old log to ${path.basename(bak)} (CSV schema updated).`);
+      return;
+    } catch (e) {
+      console.warn(`Rename failed for usage.csv (${e.message}); trying copy + reset.`);
+      fs.copyFileSync(logFile, bak);
+      fs.writeFileSync(logFile, EXPECTED_CSV_HEADER + "\n", "utf8");
+      console.log(`Copied old log to ${path.basename(bak)} and reset usage.csv (CSV schema updated).`);
+    }
   } catch (e) {
     console.warn("Could not migrate old usage.csv:", e.message);
   }
@@ -90,25 +105,43 @@ function csvEscape(v) {
   return s;
 }
 
-function metaForEvent(e) {
-  const used = new Set([
-    "ts",
-    "sessionId",
-    "participantId",
-    "participantID",
-    "mode",
-    "preset",
-    "type",
-    "tile",
-    "reason",
-    "href",
-  ]);
-  const extra = {};
-  for (const k of Object.keys(e)) {
-    if (!used.has(k) && e[k] !== undefined && e[k] !== null) extra[k] = e[k];
-  }
-  if (!Object.keys(extra).length) return "";
-  return JSON.stringify(extra);
+function joinList(value) {
+  if (Array.isArray(value)) return value.filter((x) => x != null && String(x) !== "").join(";");
+  if (value == null) return "";
+  return String(value);
+}
+
+function eventToRow(e) {
+  let present = e.present ?? "";
+  if (!present) present = joinList(e.presentIds);
+  let layoutOrder = e.layoutOrder ?? "";
+  if (Array.isArray(layoutOrder)) layoutOrder = layoutOrder.join(";");
+  let randomizeLayout = e.randomizeLayout;
+  if (typeof randomizeLayout === "boolean") randomizeLayout = randomizeLayout ? "true" : "false";
+  else if (randomizeLayout == null) randomizeLayout = "";
+  const clipIndex = e.clipIndex ?? e.index ?? "";
+  return {
+    server_ts: utcIso(),
+    client_ts: e.ts ?? "",
+    sessionId: e.sessionId ?? "",
+    participantID: e.participantId ?? e.participantID ?? "",
+    present,
+    // screen = what is visible now: "wall" (4-up) or a content label (1-view)
+    screen: e.screen ?? "",
+    // event = what just happened (view_selected, idle_timeout, …)
+    event: e.event || e.type || "",
+    tile: e.tile || e.slot || "",
+    content: e.content || e.view || "",
+    viewId: e.viewId || e.setId || "",
+    reason: e.reason ?? "",
+    url: e.url ?? "",
+    clipIndex,
+    layoutOrder,
+    randomizeLayout,
+    source: e.source ?? "",
+    message: e.message ?? "",
+    href: e.href ?? "",
+  };
 }
 
 function ensureLogHeader() {
@@ -124,20 +157,7 @@ function appendEvents(events) {
   const lines = [];
   for (const e of events) {
     if (!e || typeof e !== "object") continue;
-    const pid = e.participantId ?? e.participantID ?? "";
-    const row = {
-      server_ts: utcIso(),
-      client_ts: e.ts,
-      sessionId: e.sessionId,
-      participantID: pid,
-      mode: e.mode ?? "",
-      preset: e.preset ?? "",
-      type: e.type,
-      tile: e.tile,
-      reason: e.reason,
-      href: e.href,
-      meta: metaForEvent(e),
-    };
+    const row = eventToRow(e);
     lines.push(CSV_FIELDS.map((k) => csvEscape(row[k])).join(","));
   }
   if (lines.length) fs.appendFileSync(logFile, lines.join("\n") + "\n", "utf8");

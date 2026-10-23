@@ -58,7 +58,8 @@
         margin-bottom: 6px;
       }
       input[type="text"],
-      input[type="password"] {
+      input[type="password"],
+      input[type="number"] {
         width: 100%;
         padding: 10px 12px;
         border-radius: 8px;
@@ -83,17 +84,10 @@
         cursor: pointer;
         font-size: 0.95rem;
       }
-      .choice input {
+      .choice input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
         accent-color: var(--accent);
-      }
-      select {
-        width: 100%;
-        padding: 10px 12px;
-        border-radius: 8px;
-        border: 1px solid rgba(255, 255, 255, 0.12);
-        background: rgba(0, 0, 0, 0.25);
-        color: var(--text);
-        font-size: 0.95rem;
       }
       .hint {
         margin-top: 10px;
@@ -156,62 +150,109 @@
         gap: 10px;
         margin-top: 10px;
       }
+      .clip-list {
+        margin: 0;
+        padding-left: 1.1rem;
+        font-size: 0.9rem;
+        color: var(--text);
+      }
+      .clip-list li {
+        margin-bottom: 4px;
+      }
+      code {
+        font-size: 0.85em;
+      }
     </style>
   </head>
   <body>
     <div class="wrap">
       <h1>CZTV — Researcher control</h1>
       <p class="lead">
-        Open the chimp wall at <a href="/" target="_blank" rel="noopener">/</a> in another tab. Changes here apply in real time and are stored in this browser (localStorage + BroadcastChannel).
+        Open the chimp wall at <a href="/" target="_blank" rel="noopener">/</a> in another tab.
+        The wall always shows two live cameras (tiles 1–2) and two recorded playlists (tiles 3–4).
       </p>
 
       <section>
-        <h2>Participant</h2>
-        <label for="participantId">Participant ID (logged on every event)</label>
+        <h2>Participant coding</h2>
+        <label for="participantId">Active user (chimp touching the screen)</label>
         <input
           id="participantId"
           type="text"
           autocomplete="off"
-          placeholder="e.g. P042 or anonymous"
+          placeholder="e.g. P1"
           maxlength="128"
         />
-        <p class="hint">Updating this logs a <code>participant_change</code> event on the wall tab.</p>
+        <p class="hint" style="margin-top: 10px">
+          <strong>Shift + key</strong> sets active user · <strong>key alone</strong> toggles presence in area.
+        </p>
+        <p class="hint">
+          q–p → P1–P10 · a s d f → P11–P14 (works on wall or this page; ignored while typing in a field).
+        </p>
+        <p class="subhead">Present in area</p>
+        <div id="presentList" class="row" style="gap: 8px"></div>
+        <p id="presentStatus" class="hint" style="margin-top: 8px"></p>
       </section>
 
       <section>
-        <h2>Wall mode</h2>
-        <div class="row">
-          <label class="choice">
-            <input type="radio" name="mode" value="live" checked />
-            Live cameras
-          </label>
-          <label class="choice">
-            <input type="radio" name="mode" value="recorded" />
-            Recorded videos
-          </label>
-          <label class="choice">
-            <input type="radio" name="mode" value="network" />
-            Network cameras
-          </label>
-        </div>
-        <p class="hint">
-          Recorded mode uses files under <code>/media/</code>. Network mode pulls RTSP from your Wi-Fi camera via the local server (ffmpeg → HLS).
+        <h2>Wall layout</h2>
+        <label class="choice" style="margin-bottom: 10px">
+          <input id="randomizeLayout" type="checkbox" checked />
+          Randomize tile placement each time the wall opens
+        </label>
+        <p class="hint" style="margin-top: 0">
+          Views stay the same (2 live + familiar + unfamiliar); only screen positions shuffle.
+          Randomize applies on the next wall reload.
         </p>
+        <p class="subhead">This wall session</p>
+        <p id="layoutStatus" class="hint" style="margin-top: 0">Open the wall to assign a layout.</p>
+        <ul class="clip-list">
+          <li><code>live 1 BRU</code> / <code>live 2 enclosure</code> — network cameras</li>
+          <li><code>video 1 unfamiliar</code> — non-chimp playlist</li>
+          <li><code>video 2 familiar</code> — chimp playlist</li>
+        </ul>
+      </section>
+
+      <section>
+        <h2>Wall behaviour</h2>
+        <label class="choice" style="margin-bottom: 12px">
+          <input id="showCoderHud" type="checkbox" />
+          Show researcher HUD on wall (active / present / layout)
+        </label>
+        <p class="hint" style="margin-top: 0">Off by default so the chimp display stays clean.</p>
+
+        <label for="tapCooldownMs" style="margin-top: 14px">Tap cooldown (ms)</label>
+        <input id="tapCooldownMs" type="number" min="0" max="30000" step="100" value="2000" />
+        <p class="hint">After a tile press, ignore further tile taps for this long (stops multitap spam).</p>
+
+        <label for="edgeDeadZonePx" style="margin-top: 14px">Edge dead zone (px)</label>
+        <input id="edgeDeadZonePx" type="number" min="0" max="400" step="4" value="48" />
+        <p class="hint">Untouchable border inside each tile so edge taps don’t select the wrong panel.</p>
+
+        <label for="idleResetSec" style="margin-top: 14px">Idle reset to 4-up (seconds)</label>
+        <input id="idleResetSec" type="number" min="10" max="3600" step="10" value="300" />
+        <p class="hint">If maximized and no interaction for this long, return to the 4-view wall.</p>
       </section>
 
       <section id="networkSection">
-        <h2>Network cameras (RTSP)</h2>
+        <h2>Live cameras (tiles 1–2)</h2>
         <p class="hint" style="margin-top: 0">
-          One row per wall tile. Shared credentials apply to all cameras (typical for Tapo). Leave a tile’s host empty to skip it.
+          Defaults are set in <code>cztv-shared.js</code> (<code>LIVE_CAMERAS</code>) and pushed to the
+          server when the wall starts. You can still override here; Save writes
+          <code>cameras.local.json</code>.
         </p>
 
         <p class="subhead">Shared credentials</p>
         <label for="sharedUser">Username</label>
         <input id="sharedUser" type="text" autocomplete="off" placeholder="Camera account username" />
         <label for="sharedPass" style="margin-top: 12px">Password</label>
-        <input id="sharedPass" type="password" autocomplete="new-password" placeholder="Leave blank to keep saved password" />
+        <input
+          id="sharedPass"
+          type="password"
+          autocomplete="new-password"
+          placeholder="Leave blank to keep saved password"
+        />
 
-        <p class="subhead">Tiles 1–4</p>
+        <p class="subhead">Cameras</p>
         <div id="cameraRows"></div>
 
         <div class="row" style="margin-top: 14px">
@@ -220,16 +261,32 @@
         <p id="cameraStatus" class="status" hidden></p>
       </section>
 
-      <section id="presetSection">
-        <h2>Video preset (recorded mode)</h2>
-        <label for="preset">Which set of four clips maps to tiles 1–4</label>
-        <select id="preset" disabled></select>
+      <section id="videoSetsSection">
+        <h2>Recorded video sets</h2>
+        <p class="hint" style="margin-top: 0">
+          Each video tile cycles through its set. Later these can become “familiar chimps” vs “unfamiliar chimps”.
+        </p>
+        <div id="videoSetLists"></div>
       </section>
     </div>
 
-    <script src="cztv-shared.js"></script>
+    <script src="cztv-shared.js?v=7"></script>
     <script>
-      const { CHANNEL, readState, writeState, PRESETS } = window.CZTV;
+      const {
+        CHANNEL,
+        readState,
+        writeState,
+        VIDEO_SETS,
+        VIEW_LABELS,
+        LIVE_CAMERAS,
+        PARTICIPANT_IDS,
+        PID_HOTKEYS,
+        WALL_DEFAULTS,
+        makeSessionId,
+        resolvePidHotkey,
+        isTypingTarget,
+        normalizePresentIds,
+      } = window.CZTV;
       let bc = null;
       try {
         bc = new BroadcastChannel(CHANNEL);
@@ -238,31 +295,69 @@
       }
 
       const elParticipant = document.getElementById("participantId");
-      const elPreset = document.getElementById("preset");
+      const elPresentList = document.getElementById("presentList");
+      const elPresentStatus = document.getElementById("presentStatus");
+      const elRandomizeLayout = document.getElementById("randomizeLayout");
+      const elShowCoderHud = document.getElementById("showCoderHud");
+      const elTapCooldownMs = document.getElementById("tapCooldownMs");
+      const elEdgeDeadZonePx = document.getElementById("edgeDeadZonePx");
+      const elIdleResetSec = document.getElementById("idleResetSec");
+      const elLayoutStatus = document.getElementById("layoutStatus");
       const elCameraRows = document.getElementById("cameraRows");
+      let sessionLayoutOrder = null;
       const elSharedUser = document.getElementById("sharedUser");
       const elSharedPass = document.getElementById("sharedPass");
       const btnSaveCameras = document.getElementById("btnSaveCameras");
       const elCameraStatus = document.getElementById("cameraStatus");
-      const TILE_COUNT = 4;
+      const elVideoSetLists = document.getElementById("videoSetLists");
+      const LIVE_COUNT = 2;
       let cameraDraft = null;
+      const sessionId = typeof makeSessionId === "function" ? makeSessionId() : `ctrl_${Date.now()}`;
+
+      function nowIso() {
+        return new Date().toISOString();
+      }
+
+      function logControlEvent(type, details) {
+        const state = readState();
+        const presentIds = normalizePresentIds(state.presentIds);
+        const entry = {
+          ts: nowIso(),
+          sessionId,
+          type,
+          event: (details && details.event) || type,
+          participantId: state.participantId || "",
+          present: presentIds.join(";"),
+          screen: (details && details.screen) || "",
+          randomizeLayout: state.randomizeLayout !== false,
+          source: "control",
+          ...details,
+        };
+        console.log("[CZTV control]", entry);
+        fetch("/log", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ events: [entry] }),
+          keepalive: true,
+        }).catch(() => {});
+      }
 
       const tileFields = [];
 
       function buildCameraRows() {
         elCameraRows.innerHTML = "";
         tileFields.length = 0;
-        for (let i = 0; i < TILE_COUNT; i += 1) {
+        for (let i = 0; i < LIVE_COUNT; i += 1) {
           const row = document.createElement("div");
           row.className = "cam-row";
           row.innerHTML = `
-            <h3>Tile ${i + 1}</h3>
+            <h3>Tile ${i + 1} (live)</h3>
             <label>Label</label>
-            <input type="text" data-field="label" autocomplete="off" placeholder="e.g. Indoor left" />
+            <input type="text" data-field="label" autocomplete="off" placeholder="e.g. Outdoor left" />
             <div class="inline-2">
               <div>
                 <label>IP / host</label>
-                <input type="text" data-field="host" autocomplete="off" placeholder="e.g. 172.20.10.2" />
+                <input type="text" data-field="host" autocomplete="off" placeholder="e.g. 192.168.50.174" />
               </div>
               <div>
                 <label>RTSP path</label>
@@ -279,21 +374,108 @@
         }
       }
 
-      function getMode() {
-        const r = document.querySelector('input[name="mode"]:checked');
-        if (r && r.value === "recorded") return "recorded";
-        if (r && r.value === "network") return "network";
-        return "live";
+      function buildVideoSetLists() {
+        elVideoSetLists.innerHTML = "";
+        for (const [setId, urls] of Object.entries(VIDEO_SETS)) {
+          const block = document.createElement("div");
+          block.className = "cam-row";
+          const items = urls.map((u) => `<li><code>${u}</code></li>`).join("");
+          block.innerHTML = `
+            <h3>${VIEW_LABELS[setId] || setId} (<code>${setId}</code>)</h3>
+            <ul class="clip-list">${items}</ul>
+          `;
+          elVideoSetLists.appendChild(block);
+        }
+      }
+
+      function buildPresentList() {
+        elPresentList.innerHTML = "";
+        for (const pid of PARTICIPANT_IDS) {
+          const key = Object.keys(PID_HOTKEYS).find((k) => PID_HOTKEYS[k] === pid) || "";
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.dataset.pid = pid;
+          btn.textContent = key ? `${pid} (${key})` : pid;
+          btn.title = `Toggle ${pid} presence · Shift+${key || "?"} = active user`;
+          btn.addEventListener("click", (ev) => {
+            if (ev.shiftKey) setActiveUser(pid, "ui_shift");
+            else togglePresence(pid, "ui");
+          });
+          elPresentList.appendChild(btn);
+        }
+      }
+
+      function setLayoutStatus(order, randomize) {
+        if (!elLayoutStatus) return;
+        if (!Array.isArray(order) || !order.length) {
+          elLayoutStatus.textContent = "Open the wall to assign a layout.";
+          return;
+        }
+        const mode = randomize !== false ? "random" : "fixed";
+        elLayoutStatus.textContent = `${mode}: ${order
+          .map((v, i) => `${i + 1}=${(VIEW_LABELS && VIEW_LABELS[v]) || v}`)
+          .join(" · ")}`;
       }
 
       function setUIFromState(s) {
         elParticipant.value = s.participantId || "";
-        document.querySelectorAll('input[name="mode"]').forEach((inp) => {
-          inp.checked = inp.value === s.mode;
+        if (elRandomizeLayout) elRandomizeLayout.checked = s.randomizeLayout !== false;
+        if (elShowCoderHud) elShowCoderHud.checked = s.showCoderHud === true;
+        if (elTapCooldownMs) {
+          elTapCooldownMs.value = String(
+            s.tapCooldownMs ?? (WALL_DEFAULTS && WALL_DEFAULTS.tapCooldownMs) ?? 2000
+          );
+        }
+        if (elEdgeDeadZonePx) {
+          elEdgeDeadZonePx.value = String(
+            s.edgeDeadZonePx ?? (WALL_DEFAULTS && WALL_DEFAULTS.edgeDeadZonePx) ?? 48
+          );
+        }
+        if (elIdleResetSec) {
+          const ms = s.idleResetMs ?? (WALL_DEFAULTS && WALL_DEFAULTS.idleResetMs) ?? 300000;
+          elIdleResetSec.value = String(Math.round(ms / 1000));
+        }
+        const present = new Set(normalizePresentIds(s.presentIds));
+        elPresentList.querySelectorAll("button[data-pid]").forEach((btn) => {
+          const on = present.has(btn.dataset.pid);
+          btn.style.background = on ? "rgba(125, 222, 162, 0.28)" : "rgba(91, 140, 255, 0.18)";
+          btn.style.borderColor = on ? "rgba(125, 222, 162, 0.55)" : "rgba(255, 255, 255, 0.14)";
         });
-        elPreset.value = s.preset in PRESETS ? s.preset : "default";
-        elPreset.disabled = s.mode !== "recorded";
-        document.getElementById("networkSection").style.display = s.mode === "network" ? "block" : "none";
+        elPresentStatus.textContent = `Active: ${s.participantId || "—"} · Present: ${
+          normalizePresentIds(s.presentIds).join(" ") || "—"
+        }`;
+        setLayoutStatus(sessionLayoutOrder, s.randomizeLayout);
+      }
+
+      function setActiveUser(pid, reason, key) {
+        const prev = readState();
+        if ((prev.participantId || "") === pid) {
+          setUIFromState(prev);
+          return;
+        }
+        const next = writeState({ ...prev, participantId: pid });
+        setUIFromState(next);
+        broadcast(next);
+        logControlEvent("active_user_set", {
+          reason,
+          message: `${prev.participantId || "—"}→${pid}`,
+        });
+      }
+
+      function togglePresence(pid, reason, key) {
+        const prev = readState();
+        const current = new Set(normalizePresentIds(prev.presentIds));
+        const wasPresent = current.has(pid);
+        if (wasPresent) current.delete(pid);
+        else current.add(pid);
+        const presentIds = normalizePresentIds([...current]);
+        const next = writeState({ ...prev, presentIds });
+        setUIFromState(next);
+        broadcast(next);
+        logControlEvent(wasPresent ? "presence_off" : "presence_on", {
+          reason,
+          message: pid,
+        });
       }
 
       function setCameraStatus(text, ok) {
@@ -311,21 +493,11 @@
       function applyCameraDraft(cfg) {
         cameraDraft = cfg;
         const cameras = Array.isArray(cfg.cameras) ? cfg.cameras : [];
-        const tileMap = Array.isArray(cfg.tileMap) ? cfg.tileMap : [0, 1, 2, 3];
+        const tileMap = Array.isArray(cfg.tileMap) ? cfg.tileMap : [0, 1];
 
-        const mirrored =
-          cameras.length === 1 &&
-          tileMap.length === TILE_COUNT &&
-          tileMap.every((idx) => idx === tileMap[0]);
-
-        for (let i = 0; i < TILE_COUNT; i += 1) {
-          let cam = {};
-          if (mirrored) {
-            cam = i === 0 ? cameras[0] : cameras[i] || {};
-          } else {
-            const mapIdx = tileMap[i] ?? i;
-            cam = cameras[mapIdx] || cameras[i] || {};
-          }
+        for (let i = 0; i < LIVE_COUNT; i += 1) {
+          const mapIdx = tileMap[i] ?? i;
+          const cam = cameras[mapIdx] || cameras[i] || {};
           tileFields[i].label.value = cam.label || `Camera ${i + 1}`;
           tileFields[i].host.value = cam.host || "";
           tileFields[i].path.value = cam.path || "/stream1";
@@ -356,16 +528,48 @@
           username,
           password,
         }));
+        // Keep two empty slots so older 4-slot configs stay compatible if needed.
+        while (cameras.length < 4) {
+          cameras.push({
+            id: `cam${cameras.length + 1}`,
+            label: `Camera ${cameras.length + 1}`,
+            host: "",
+            path: "/stream1",
+            username,
+            password,
+          });
+        }
         return { cameras, tileMap: [0, 1, 2, 3] };
       }
 
+      function applyScriptCameras() {
+        const cameras = Array.isArray(LIVE_CAMERAS) ? LIVE_CAMERAS : [];
+        for (let i = 0; i < LIVE_COUNT; i += 1) {
+          const cam = cameras[i] || {};
+          tileFields[i].label.value = cam.label || `Camera ${i + 1}`;
+          tileFields[i].host.value = cam.host || "";
+          tileFields[i].path.value = cam.path || "/stream1";
+        }
+        const credCam = cameras.find((c) => c.username) || cameras[0] || {};
+        elSharedUser.value = credCam.username || "";
+        elSharedPass.value = credCam.password || "";
+        elSharedPass.placeholder = "From LIVE_CAMERAS in cztv-shared.js";
+      }
+
       async function loadCameras() {
+        applyScriptCameras();
         try {
           const res = await fetch("/api/cameras");
           const cfg = await res.json();
-          applyCameraDraft(cfg);
+          // Prefer script defaults when the server has empty hosts.
+          const serverCams = Array.isArray(cfg.cameras) ? cfg.cameras : [];
+          const serverHasHost = serverCams.some((c) => c && c.host);
+          if (serverHasHost) applyCameraDraft(cfg);
+          else if (!cfg.ffmpeg) {
+            setCameraStatus("ffmpeg not found on server PATH — install FFmpeg and restart.", false);
+          }
         } catch {
-          setCameraStatus("Could not load camera settings from server.", false);
+          setCameraStatus("Could not load camera settings from server (using script defaults).", false);
         }
       }
 
@@ -385,7 +589,7 @@
             return;
           }
           applyCameraDraft(cfg);
-          setCameraStatus("Saved. Wall will reload network streams if that mode is active.", true);
+          setCameraStatus("Saved. Wall will reload live camera tiles.", true);
           if (bc) {
             try {
               bc.postMessage({ type: "cameras_updated" });
@@ -416,42 +620,69 @@
         broadcast(next);
       }
 
-      function fillPresetOptions() {
-        elPreset.innerHTML = "";
-        const labels = {
-          default: "Default (jungle, chimpvid, crossing, chimps2vid)",
-          alt_order: "Alt order (swap positions)",
-        };
-        for (const id of Object.keys(PRESETS)) {
-          const opt = document.createElement("option");
-          opt.value = id;
-          opt.textContent = labels[id] || id;
-          elPreset.appendChild(opt);
-        }
-      }
-
       function init() {
         buildCameraRows();
-        fillPresetOptions();
+        buildVideoSetLists();
+        buildPresentList();
         const s = readState();
         setUIFromState(s);
         broadcast(s);
 
         elParticipant.addEventListener("change", () => {
-          pushUpdate({ participantId: elParticipant.value.trim() });
+          const prev = readState();
+          const nextId = elParticipant.value.trim();
+          pushUpdate({ participantId: nextId });
+          if ((prev.participantId || "") !== nextId) {
+            logControlEvent("active_user_set", {
+              reason: "form",
+              message: `${prev.participantId || "—"}→${nextId}`,
+            });
+          }
         });
         elParticipant.addEventListener("blur", () => {
           pushUpdate({ participantId: elParticipant.value.trim() });
         });
 
-        document.querySelectorAll('input[name="mode"]').forEach((inp) => {
-          inp.addEventListener("change", () => {
-            pushUpdate({ mode: getMode() });
+        if (elRandomizeLayout) {
+          elRandomizeLayout.addEventListener("change", () => {
+            pushUpdate({ randomizeLayout: elRandomizeLayout.checked });
+            logControlEvent("randomize_layout_toggle", {
+              reason: "control",
+              message: elRandomizeLayout.checked ? "on" : "off",
+            });
           });
+        }
+
+        if (elShowCoderHud) {
+          elShowCoderHud.addEventListener("change", () => {
+            pushUpdate({ showCoderHud: elShowCoderHud.checked });
+          });
+        }
+
+        function pushWallBehaviourFromInputs() {
+          const cooldown = Number(elTapCooldownMs && elTapCooldownMs.value);
+          const deadZone = Number(elEdgeDeadZonePx && elEdgeDeadZonePx.value);
+          const idleSec = Number(elIdleResetSec && elIdleResetSec.value);
+          pushUpdate({
+            tapCooldownMs: Number.isFinite(cooldown) ? cooldown : 2000,
+            edgeDeadZonePx: Number.isFinite(deadZone) ? deadZone : 48,
+            idleResetMs: Number.isFinite(idleSec) ? Math.round(idleSec * 1000) : 300000,
+          });
+        }
+
+        [elTapCooldownMs, elEdgeDeadZonePx, elIdleResetSec].forEach((el) => {
+          if (!el) return;
+          el.addEventListener("change", pushWallBehaviourFromInputs);
+          el.addEventListener("blur", pushWallBehaviourFromInputs);
         });
 
-        elPreset.addEventListener("change", () => {
-          pushUpdate({ preset: elPreset.value });
+        document.addEventListener("keydown", (e) => {
+          if (isTypingTarget(e.target)) return;
+          const hit = resolvePidHotkey(e);
+          if (!hit) return;
+          e.preventDefault();
+          if (hit.shift) setActiveUser(hit.pid, "hotkey_shift", hit.key);
+          else togglePresence(hit.pid, "hotkey", hit.key);
         });
 
         btnSaveCameras.addEventListener("click", () => {
@@ -462,9 +693,18 @@
 
         if (bc) {
           bc.addEventListener("message", (ev) => {
-            if (!ev.data || ev.data.type !== "state" || !ev.data.payload) return;
-            const s2 = writeState(ev.data.payload);
-            setUIFromState(s2);
+            if (!ev.data) return;
+            if (ev.data.type === "layout" && ev.data.payload) {
+              sessionLayoutOrder = Array.isArray(ev.data.payload.layoutOrder)
+                ? ev.data.payload.layoutOrder
+                : null;
+              setLayoutStatus(sessionLayoutOrder, ev.data.payload.randomizeLayout);
+              return;
+            }
+            if (ev.data.type === "state" && ev.data.payload) {
+              const s2 = writeState(ev.data.payload);
+              setUIFromState(s2);
+            }
           });
         }
 

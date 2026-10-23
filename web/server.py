@@ -43,13 +43,20 @@ CSV_FIELDS = [
     "client_ts",
     "sessionId",
     "participantID",
-    "mode",
-    "preset",
-    "type",
+    "present",
+    "screen",
+    "event",
     "tile",
+    "content",
+    "viewId",
     "reason",
+    "url",
+    "clipIndex",
+    "layoutOrder",
+    "randomizeLayout",
+    "source",
+    "message",
     "href",
-    "meta",
 ]
 
 EXPECTED_CSV_HEADER = ",".join(CSV_FIELDS)
@@ -75,8 +82,17 @@ def migrate_log_csv_if_needed() -> None:
     try:
         LOG_FILE.rename(bak)
         print(f"Renamed old log to {bak.name} (CSV schema updated).")
+        return
     except Exception as e:
-        print(f"Could not migrate old usage.csv: {e}")
+        print(f"Rename failed for usage.csv ({e}); trying copy + reset.")
+    try:
+        import shutil
+
+        shutil.copy2(LOG_FILE, bak)
+        LOG_FILE.write_text(EXPECTED_CSV_HEADER + "\n", encoding="utf-8")
+        print(f"Copied old log to {bak.name} and reset usage.csv (CSV schema updated).")
+    except Exception as e2:
+        print(f"Could not migrate old usage.csv: {e2}")
 
 
 def _path_is_within(parent: Path, child: Path) -> bool:
@@ -89,23 +105,49 @@ def _path_is_within(parent: Path, child: Path) -> bool:
     return chi == par or chi.startswith(par + os.sep)
 
 
-def meta_for_event(e: dict) -> str:
-    used = {
-        "ts",
-        "sessionId",
-        "participantId",
-        "participantID",
-        "mode",
-        "preset",
-        "type",
-        "tile",
-        "reason",
-        "href",
-    }
-    extra = {k: v for k, v in e.items() if k not in used and v is not None}
-    if not extra:
+def _join_list(value) -> str:
+    if isinstance(value, list):
+        return ";".join(str(x) for x in value if x is not None and str(x) != "")
+    if value is None:
         return ""
-    return json.dumps(extra, separators=(",", ":"), ensure_ascii=False)
+    return str(value)
+
+
+def event_to_row(e: dict) -> dict:
+    present = e.get("present", "")
+    if not present:
+        present = _join_list(e.get("presentIds"))
+    layout_order = e.get("layoutOrder", "")
+    if isinstance(layout_order, list):
+        layout_order = ";".join(str(x) for x in layout_order)
+    randomize = e.get("randomizeLayout", "")
+    if isinstance(randomize, bool):
+        randomize = "true" if randomize else "false"
+    clip_index = e.get("clipIndex", e.get("index", ""))
+    if clip_index is None:
+        clip_index = ""
+    return {
+        "server_ts": utc_iso(),
+        "client_ts": e.get("ts", ""),
+        "sessionId": e.get("sessionId", ""),
+        "participantID": e.get("participantId", e.get("participantID", "")),
+        "present": present,
+        # screen = what is visible now: "wall" (4-up) or a content label (1-view)
+        "screen": e.get("screen", ""),
+        # event = what just happened (view_selected, idle_timeout, …)
+        "event": e.get("event") or e.get("type") or "",
+        "tile": e.get("tile") or e.get("slot") or "",
+        "content": e.get("content") or e.get("view") or "",
+        "viewId": e.get("viewId") or e.get("setId") or "",
+        "reason": e.get("reason", ""),
+        "url": e.get("url", ""),
+        "clipIndex": clip_index,
+        "layoutOrder": layout_order,
+        "randomizeLayout": randomize,
+        "source": e.get("source", ""),
+        "message": e.get("message", ""),
+        "href": e.get("href", ""),
+    }
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -322,22 +364,7 @@ class Handler(SimpleHTTPRequestHandler):
             for e in events:
                 if not isinstance(e, dict):
                     continue
-                pid = e.get("participantId", e.get("participantID", ""))
-                w.writerow(
-                    {
-                        "server_ts": utc_iso(),
-                        "client_ts": e.get("ts"),
-                        "sessionId": e.get("sessionId"),
-                        "participantID": pid,
-                        "mode": e.get("mode", ""),
-                        "preset": e.get("preset", ""),
-                        "type": e.get("type"),
-                        "tile": e.get("tile"),
-                        "reason": e.get("reason"),
-                        "href": e.get("href"),
-                        "meta": meta_for_event(e),
-                    }
-                )
+                w.writerow(event_to_row(e))
 
         self.send_response(204)
         self.end_headers()

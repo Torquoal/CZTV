@@ -2,6 +2,11 @@
 logs/*.csv
 logs/*.json
 
+# Local camera credentials + transient HLS segments
+web/cameras.local.json
+web/.hls-cache/
+web/.tools/
+
 # OS / editor noise
 .DS_Store
 Thumbs.db
