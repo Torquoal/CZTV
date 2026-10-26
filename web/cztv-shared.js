@@ -15,12 +15,15 @@
   };
 
   /**
-   * Semantic views (what content is shown). Screen slot order may be shuffled.
-   * Default order (randomize off): top-left → live1, top-right → live2,
+   * Semantic views (what content is shown). Screen slot order is counterbalanced
+   * across sessions (all 24 = 4! permutations), not random.
+   * Default order (counterbalance off): top-left → live1, top-right → live2,
    * bottom-left → familiar, bottom-right → unfamiliar.
    */
   const VIEW_IDS = ["live1", "live2", "familiar", "unfamiliar"];
   const DEFAULT_LAYOUT_ORDER = VIEW_IDS.slice();
+  const LAYOUT_PERM_INDEX_KEY = "cztv_layout_perm_index_v1";
+  const LAYOUT_PERM_COUNT = 24; // 4!
 
   /** Human-readable content names written to CSV `view` (position goes in `tile`/`slot`). */
   const VIEW_LABELS = {
@@ -112,15 +115,20 @@
     return String(id || "").trim();
   }
 
-  function shuffleInPlace(arr) {
-    for (let i = arr.length - 1; i > 0; i -= 1) {
-      const j = Math.floor(Math.random() * (i + 1));
-      const tmp = arr[i];
-      arr[i] = arr[j];
-      arr[j] = tmp;
+  function permutationsOf(items) {
+    if (items.length <= 1) return [items.slice()];
+    const out = [];
+    for (let i = 0; i < items.length; i += 1) {
+      const rest = items.slice(0, i).concat(items.slice(i + 1));
+      for (const p of permutationsOf(rest)) {
+        out.push([items[i]].concat(p));
+      }
     }
-    return arr;
+    return out;
   }
+
+  /** Fixed list of all 24 view placements (lexicographic from DEFAULT_LAYOUT_ORDER). */
+  const ALL_LAYOUT_PERMUTATIONS = permutationsOf(DEFAULT_LAYOUT_ORDER);
 
   function normalizeLayoutOrder(order) {
     const allowed = new Set(VIEW_IDS);
@@ -138,10 +146,45 @@
     return out.slice(0, 4);
   }
 
-  function buildLayoutOrder(randomize) {
-    const order = DEFAULT_LAYOUT_ORDER.slice();
-    if (randomize) shuffleInPlace(order);
-    return order;
+  function readLayoutPermIndex() {
+    try {
+      const n = Number(localStorage.getItem(LAYOUT_PERM_INDEX_KEY));
+      if (!Number.isFinite(n)) return 0;
+      return ((Math.trunc(n) % LAYOUT_PERM_COUNT) + LAYOUT_PERM_COUNT) % LAYOUT_PERM_COUNT;
+    } catch {
+      return 0;
+    }
+  }
+
+  function writeLayoutPermIndex(idx) {
+    const n = ((Math.trunc(idx) % LAYOUT_PERM_COUNT) + LAYOUT_PERM_COUNT) % LAYOUT_PERM_COUNT;
+    try {
+      localStorage.setItem(LAYOUT_PERM_INDEX_KEY, String(n));
+    } catch {
+      /* ignore */
+    }
+    return n;
+  }
+
+  /**
+   * Pick this session's layout.
+   * counterbalance=true → next of the 24 permutations (advances for next session).
+   * counterbalance=false → fixed default order (layoutIndex = -1).
+   * @returns {{ order: string[], layoutIndex: number }}
+   */
+  function takeSessionLayout(counterbalance) {
+    if (!counterbalance) {
+      return { order: DEFAULT_LAYOUT_ORDER.slice(), layoutIndex: -1 };
+    }
+    const layoutIndex = readLayoutPermIndex();
+    const order = (ALL_LAYOUT_PERMUTATIONS[layoutIndex] || DEFAULT_LAYOUT_ORDER).slice();
+    writeLayoutPermIndex(layoutIndex + 1);
+    return { order: normalizeLayoutOrder(order), layoutIndex };
+  }
+
+  /** @deprecated use takeSessionLayout — kept for older callers */
+  function buildLayoutOrder(counterbalance) {
+    return takeSessionLayout(counterbalance).order;
   }
 
   function clampInt(value, min, max, fallback) {
@@ -154,6 +197,8 @@
     return {
       participantId: "",
       presentIds: [],
+      // When true: cycle through all 24 placements across sessions (counterbalance).
+      // When false: always use DEFAULT_LAYOUT_ORDER.
       randomizeLayout: true,
       showCoderHud: WALL_DEFAULTS.showCoderHud,
       tapCooldownMs: WALL_DEFAULTS.tapCooldownMs,
@@ -253,6 +298,8 @@
     WALL_DEFAULTS,
     VIEW_IDS,
     DEFAULT_LAYOUT_ORDER,
+    ALL_LAYOUT_PERMUTATIONS,
+    LAYOUT_PERM_COUNT,
     VIEW_LABELS,
     VIDEO_SETS,
     LIVE_CAMERAS,
@@ -262,6 +309,9 @@
     normalizePresentIds,
     normalizeParticipantId,
     normalizeLayoutOrder,
+    readLayoutPermIndex,
+    writeLayoutPermIndex,
+    takeSessionLayout,
     buildLayoutOrder,
     makeSessionId,
     resolvePidHotkey,

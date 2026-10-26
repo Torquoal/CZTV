@@ -197,12 +197,13 @@
         <h2>Wall layout</h2>
         <label class="choice" style="margin-bottom: 10px">
           <input id="randomizeLayout" type="checkbox" checked />
-          Randomize tile placement each time the wall opens
+          Counterbalance tile placement across sessions (all 24 layouts)
         </label>
         <p class="hint" style="margin-top: 0">
-          Views stay the same (2 live + familiar + unfamiliar); only screen positions shuffle.
-          Randomize applies on the next wall reload.
+          Each wall open uses the next of the 24 possible view×position combinations (4!),
+          then advances. Turn off to always use the fixed default order. Applies on the next wall reload.
         </p>
+        <p id="layoutNextHint" class="hint" style="margin-top: 6px"></p>
         <p class="subhead">This wall session</p>
         <p id="layoutStatus" class="hint" style="margin-top: 0">Open the wall to assign a layout.</p>
         <ul class="clip-list">
@@ -270,7 +271,7 @@
       </section>
     </div>
 
-    <script src="cztv-shared.js?v=7"></script>
+    <script src="cztv-shared.js?v=8"></script>
     <script>
       const {
         CHANNEL,
@@ -282,6 +283,8 @@
         PARTICIPANT_IDS,
         PID_HOTKEYS,
         WALL_DEFAULTS,
+        LAYOUT_PERM_COUNT,
+        readLayoutPermIndex,
         makeSessionId,
         resolvePidHotkey,
         isTypingTarget,
@@ -303,8 +306,10 @@
       const elEdgeDeadZonePx = document.getElementById("edgeDeadZonePx");
       const elIdleResetSec = document.getElementById("idleResetSec");
       const elLayoutStatus = document.getElementById("layoutStatus");
+      const elLayoutNextHint = document.getElementById("layoutNextHint");
       const elCameraRows = document.getElementById("cameraRows");
       let sessionLayoutOrder = null;
+      let sessionLayoutIndex = null;
       const elSharedUser = document.getElementById("sharedUser");
       const elSharedPass = document.getElementById("sharedPass");
       const btnSaveCameras = document.getElementById("btnSaveCameras");
@@ -405,13 +410,32 @@
         }
       }
 
-      function setLayoutStatus(order, randomize) {
+      function updateLayoutNextHint(counterbalance) {
+        if (!elLayoutNextHint) return;
+        if (counterbalance === false) {
+          elLayoutNextHint.textContent = "Next wall open: fixed default order.";
+          return;
+        }
+        const total = LAYOUT_PERM_COUNT || 24;
+        const nextIdx =
+          typeof readLayoutPermIndex === "function" ? readLayoutPermIndex() : 0;
+        elLayoutNextHint.textContent = `Next wall open: layout ${nextIdx + 1} of ${total}.`;
+      }
+
+      function setLayoutStatus(order, randomize, index) {
         if (!elLayoutStatus) return;
+        updateLayoutNextHint(randomize !== false);
         if (!Array.isArray(order) || !order.length) {
           elLayoutStatus.textContent = "Open the wall to assign a layout.";
           return;
         }
-        const mode = randomize !== false ? "random" : "fixed";
+        const total = LAYOUT_PERM_COUNT || 24;
+        const mode =
+          randomize === false
+            ? "fixed"
+            : Number.isFinite(index) && index >= 0
+              ? `counterbalance ${index + 1}/${total}`
+              : "counterbalance";
         elLayoutStatus.textContent = `${mode}: ${order
           .map((v, i) => `${i + 1}=${(VIEW_LABELS && VIEW_LABELS[v]) || v}`)
           .join(" · ")}`;
@@ -444,7 +468,7 @@
         elPresentStatus.textContent = `Active: ${s.participantId || "—"} · Present: ${
           normalizePresentIds(s.presentIds).join(" ") || "—"
         }`;
-        setLayoutStatus(sessionLayoutOrder, s.randomizeLayout);
+        setLayoutStatus(sessionLayoutOrder, s.randomizeLayout, sessionLayoutIndex);
       }
 
       function setActiveUser(pid, reason, key) {
@@ -646,9 +670,10 @@
         if (elRandomizeLayout) {
           elRandomizeLayout.addEventListener("change", () => {
             pushUpdate({ randomizeLayout: elRandomizeLayout.checked });
+            updateLayoutNextHint(elRandomizeLayout.checked);
             logControlEvent("randomize_layout_toggle", {
               reason: "control",
-              message: elRandomizeLayout.checked ? "on" : "off",
+              message: elRandomizeLayout.checked ? "counterbalance_on" : "fixed",
             });
           });
         }
@@ -698,7 +723,14 @@
               sessionLayoutOrder = Array.isArray(ev.data.payload.layoutOrder)
                 ? ev.data.payload.layoutOrder
                 : null;
-              setLayoutStatus(sessionLayoutOrder, ev.data.payload.randomizeLayout);
+              sessionLayoutIndex = Number.isFinite(ev.data.payload.layoutIndex)
+                ? ev.data.payload.layoutIndex
+                : null;
+              setLayoutStatus(
+                sessionLayoutOrder,
+                ev.data.payload.randomizeLayout,
+                sessionLayoutIndex
+              );
               return;
             }
             if (ev.data.type === "state" && ev.data.payload) {

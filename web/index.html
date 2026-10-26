@@ -178,7 +178,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script src="cztv-shared.js?v=7"></script>
+    <script src="cztv-shared.js?v=8"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
       const coderHud = document.getElementById("coderHud");
@@ -230,26 +230,21 @@
           Array.isArray(order) && order.length === 4
             ? order
             : ["live1", "live2", "familiar", "unfamiliar"]);
-      const buildLayoutOrder =
-        CZTV.buildLayoutOrder ||
-        ((randomize) => {
+      const takeSessionLayout =
+        CZTV.takeSessionLayout ||
+        ((counterbalance) => {
           const order = ["live1", "live2", "familiar", "unfamiliar"];
-          if (!randomize) return order;
-          for (let i = order.length - 1; i > 0; i -= 1) {
-            const j = Math.floor(Math.random() * (i + 1));
-            const tmp = order[i];
-            order[i] = order[j];
-            order[j] = tmp;
-          }
-          return order;
+          return { order, layoutIndex: counterbalance ? 0 : -1 };
         });
 
       /** @type {{ participantId: string, presentIds: string[], randomizeLayout: boolean }} */
       let runtimeState = readState();
+      /** Counterbalance on → next of 24 fixed permutations; off → default order. */
+      const sessionLayout = takeSessionLayout(runtimeState.randomizeLayout !== false);
       /** @type {string[]} screen slots 0–3 → view ids for this wall session */
-      let layoutOrder = normalizeLayoutOrder(
-        buildLayoutOrder(runtimeState.randomizeLayout !== false)
-      );
+      let layoutOrder = normalizeLayoutOrder(sessionLayout.order);
+      /** @type {number} 0–23 when counterbalancing; -1 when fixed */
+      let layoutIndex = Number.isFinite(sessionLayout.layoutIndex) ? sessionLayout.layoutIndex : -1;
 
       const hudActive = document.getElementById("hudActive");
       const hudPresent = document.getElementById("hudPresent");
@@ -263,7 +258,10 @@
           hudPresent.textContent = list.length ? list.join(" ") : "—";
         }
         if (hudLayout) {
-          const mode = runtimeState.randomizeLayout !== false ? "random" : "fixed";
+          const mode =
+            runtimeState.randomizeLayout !== false
+              ? `cb ${layoutIndex + 1}/24`
+              : "fixed";
           hudLayout.textContent = `${mode}: ${layoutOrder
             .map((v, i) => `${i + 1}=${contentLabelForView(v)}`)
             .join(" · ")}`;
@@ -354,6 +352,7 @@
             type: "layout",
             payload: {
               layoutOrder: layoutOrder.slice(),
+              layoutIndex,
               randomizeLayout: runtimeState.randomizeLayout !== false,
             },
           });
@@ -465,6 +464,7 @@
           screen: currentScreenLabel(),
           randomizeLayout: runtimeState.randomizeLayout !== false,
           layoutOrder: layoutOrder.join(";"),
+          layoutIndex,
           source: "wall",
         };
       }
