@@ -87,7 +87,32 @@
         display: grid;
       }
 
-      /* Researcher-only startup overlay (hidden once media is playing). */
+      /* Full-screen home / start image (tap to enter wall; hotkey b to return). */
+      #homeScreen[hidden] {
+        display: none;
+      }
+      #homeScreen {
+        position: fixed;
+        inset: 0;
+        z-index: 10050;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        background: #000;
+        cursor: pointer;
+        touch-action: manipulation;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #homeScreen img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        pointer-events: none;
+      }
+
+      /* Researcher-only media fallback overlay (if autoplay/streams fail). */
       #startOverlay[hidden] {
         display: none;
       }
@@ -167,6 +192,10 @@
       </main>
     </div>
 
+    <div id="homeScreen" role="button" aria-label="Start screen — tap to open wall" tabindex="0">
+      <img src="/media/placeholder.png" alt="" draggable="false" />
+    </div>
+
     <div id="startOverlay" hidden>
       <button id="btnStart" type="button">Start</button>
     </div>
@@ -178,7 +207,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script src="cztv-shared.js?v=8"></script>
+    <script src="cztv-shared.js?v=9"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
       const coderHud = document.getElementById("coderHud");
@@ -429,8 +458,12 @@
         }
       });
 
-      /** What is on screen right now: "wall" (4-up) or a content label (maximized view). */
+      const homeScreen = document.getElementById("homeScreen");
+      let onHomeScreen = true;
+
+      /** What is on screen right now: start | wall | maximized content label. */
       function currentScreenLabel() {
+        if (onHomeScreen) return "start";
         if (!document.body.classList.contains("maximized")) return "wall";
         const active = document.querySelector('.tile[data-max="true"]');
         if (!active) return "wall";
@@ -444,6 +477,8 @@
           if (reason === "esc") return "esc_deselect";
           return "view_deselected";
         }
+        if (type === "home_show") return "start_enter";
+        if (type === "home_hide") return "start_exit";
         if (type === "video_clip_start") return "clip_start";
         if (type === "live_tile_ready") return "live_ready";
         if (type === "active_user_set") return "active_user_set";
@@ -453,6 +488,42 @@
         if (type === "wall_start") return "wall_start";
         if (type === "app_start") return "app_start";
         return type || "";
+      }
+
+      function showHomeScreen(reason) {
+        if (onHomeScreen && homeScreen && !homeScreen.hidden) return;
+        // Leave any maximized tile before covering the wall.
+        if (document.body.classList.contains("maximized")) {
+          setFourUp(reason === "hotkey_b" ? "home" : reason || "home");
+        }
+        onHomeScreen = true;
+        if (homeScreen) homeScreen.hidden = false;
+        noteActivity();
+        logEvent("home_show", {
+          reason: reason || "show",
+          screen: "start",
+          event: "start_enter",
+        });
+      }
+
+      function hideHomeScreen(reason) {
+        if (!onHomeScreen && homeScreen && homeScreen.hidden) return;
+        onHomeScreen = false;
+        if (homeScreen) homeScreen.hidden = true;
+        noteActivity();
+        logEvent("home_hide", {
+          reason: reason || "tap",
+          screen: "wall",
+          event: "start_exit",
+        });
+        if (!wallStarted) startWall();
+      }
+
+      function handleHomePointer() {
+        if (!onHomeScreen) return;
+        if (inCooldown()) return;
+        markTap();
+        hideHomeScreen("tap");
       }
 
       function logContext() {
@@ -491,8 +562,12 @@
 
       applyLayoutToDom();
       updateCoderHud();
-      logEvent("app_start", { href: location.href, screen: "wall" });
-      logEvent("layout_assigned", { screen: "wall" });
+      // Begin on the start image; wall media preloads underneath.
+      onHomeScreen = true;
+      if (homeScreen) homeScreen.hidden = false;
+      logEvent("app_start", { href: location.href, screen: "start" });
+      logEvent("layout_assigned", { screen: "start" });
+      logEvent("home_show", { reason: "app_start", screen: "start", event: "start_enter" });
       broadcastLayout();
 
       function setMax(tileEl, reason) {
@@ -526,6 +601,7 @@
       }
 
       function handleTilePointer(tileEl, clientX, clientY) {
+        if (onHomeScreen) return;
         if (inCooldown()) return;
         // When maximized, whole screen is one tile — no edge dead-zone.
         if (!document.body.classList.contains("maximized")) {
@@ -548,6 +624,7 @@
       });
 
       setInterval(() => {
+        if (onHomeScreen) return;
         if (!document.body.classList.contains("maximized")) return;
         if (Date.now() - lastActivityAt < idleResetMs()) return;
         setFourUp("idle");
@@ -597,14 +674,28 @@
       }
 
       document.addEventListener("keydown", (e) => {
+        if (isTypingTarget(e.target)) return;
+        const key = String(e.key || "").toLowerCase();
+
+        // b → return to full-screen start image
+        if (key === "b" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+          e.preventDefault();
+          if (inCooldown()) return;
+          markTap();
+          showHomeScreen("hotkey_b");
+          return;
+        }
+
         if (e.key === "Escape") {
+          if (onHomeScreen) return;
           if (!inCooldown()) {
             markTap();
             setFourUp("esc");
           }
           return;
         }
-        if (isTypingTarget(e.target)) return;
+
+        if (onHomeScreen) return;
         const hit = resolvePidHotkey(e);
         if (!hit) return;
         e.preventDefault();
@@ -612,6 +703,23 @@
         if (hit.shift) setActiveUser(hit.pid, "hotkey_shift", hit.key);
         else togglePresence(hit.pid, "hotkey", hit.key);
       });
+
+      if (homeScreen) {
+        homeScreen.addEventListener(
+          "pointerup",
+          (e) => {
+            if (e.button != null && e.button !== 0) return;
+            handleHomePointer();
+          },
+          { passive: true }
+        );
+        homeScreen.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            handleHomePointer();
+          }
+        });
+      }
 
       const startOverlay = document.getElementById("startOverlay");
       const startBtn = document.getElementById("btnStart");
@@ -723,6 +831,8 @@
       }
 
       function showOverlay() {
+        // Keep the home PNG on top; researcher Start is for the wall only.
+        if (onHomeScreen) return;
         startBtn.textContent = "Start";
         startOverlay.hidden = false;
       }
