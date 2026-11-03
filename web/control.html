@@ -25,7 +25,7 @@
         line-height: 1.5;
       }
       .wrap {
-        max-width: 640px;
+        max-width: 960px;
         margin: 0 auto;
         padding: 24px 20px 48px;
       }
@@ -110,6 +110,19 @@
         opacity: 0.5;
         cursor: not-allowed;
       }
+      #btnEmergencyStop {
+        background: rgba(220, 60, 60, 0.35);
+        border-color: rgba(255, 120, 120, 0.55);
+        font-weight: 800;
+      }
+      #btnEmergencyResume {
+        background: rgba(125, 222, 162, 0.22);
+        border-color: rgba(125, 222, 162, 0.45);
+      }
+      #emergencyStatus.is-active {
+        color: #ffb4b4;
+        font-weight: 700;
+      }
       .status {
         margin-top: 10px;
         font-size: 0.85rem;
@@ -168,8 +181,7 @@
     <div class="wrap">
       <h1>CZTV — Researcher control</h1>
       <p class="lead">
-        Open the chimp wall at <a href="/" target="_blank" rel="noopener">/</a> in another tab.
-        The wall always shows two live cameras (tiles 1–2) and two recorded playlists (tiles 3–4).
+        
       </p>
 
       <section>
@@ -191,18 +203,29 @@
         <p class="subhead">Present in area</p>
         <div id="presentList" class="row" style="gap: 8px"></div>
         <p id="presentStatus" class="hint" style="margin-top: 8px"></p>
+        <p class="hint" style="margin-top: 14px">
+          <strong>b</strong> on the wall returns to the engagement (start) screen and stops the
+          session webcam recording.
+        
+      </section>
+
+      <section>
+        <h2>Emergency</h2>
+ 
+        <div class="row" style="gap: 10px; margin-top: 10px">
+          <button id="btnEmergencyStop" type="button">Emergency stop</button>
+          <button id="btnEmergencyResume" type="button">Resume</button>
+        </div>
+        <p id="emergencyStatus" class="hint" style="margin-top: 8px"></p>
       </section>
 
       <section>
         <h2>Wall layout</h2>
         <label class="choice" style="margin-bottom: 10px">
           <input id="randomizeLayout" type="checkbox" checked />
-          Counterbalance tile placement across sessions (all 24 layouts)
+          Counterbalance tile placement across sessions
         </label>
-        <p class="hint" style="margin-top: 0">
-          Each wall open uses the next of the 24 possible view×position combinations (4!),
-          then advances. Turn off to always use the fixed default order. Applies on the next wall reload.
-        </p>
+
         <p id="layoutNextHint" class="hint" style="margin-top: 6px"></p>
         <p class="subhead">This wall session</p>
         <p id="layoutStatus" class="hint" style="margin-top: 0">Open the wall to assign a layout.</p>
@@ -220,6 +243,15 @@
           Show researcher HUD on wall (active / present / layout)
         </label>
         <p class="hint" style="margin-top: 0">Off by default so the chimp display stays clean.</p>
+
+        <label class="choice" style="margin-bottom: 12px">
+          <input id="lockFullscreen" type="checkbox" checked />
+          Lock fullscreen (top-edge shield + ignore Esc)
+        </label>
+        <p class="hint" style="margin-top: 0">
+          When on, the wall stays fullscreen and blocks the top ~72px          
+          Quick toggle on the wall: <strong>Ctrl+Shift+F</strong>.
+        </p>
 
         <label for="tapCooldownMs" style="margin-top: 14px">Tap cooldown (ms)</label>
         <input id="tapCooldownMs" type="number" min="0" max="30000" step="100" value="2000" />
@@ -271,7 +303,7 @@
       </section>
     </div>
 
-    <script src="cztv-shared.js?v=8"></script>
+    <script src="cztv-shared.js?v=13"></script>
     <script>
       const {
         CHANNEL,
@@ -302,9 +334,13 @@
       const elPresentStatus = document.getElementById("presentStatus");
       const elRandomizeLayout = document.getElementById("randomizeLayout");
       const elShowCoderHud = document.getElementById("showCoderHud");
+      const elLockFullscreen = document.getElementById("lockFullscreen");
       const elTapCooldownMs = document.getElementById("tapCooldownMs");
       const elEdgeDeadZonePx = document.getElementById("edgeDeadZonePx");
       const elIdleResetSec = document.getElementById("idleResetSec");
+      const btnEmergencyStop = document.getElementById("btnEmergencyStop");
+      const btnEmergencyResume = document.getElementById("btnEmergencyResume");
+      const elEmergencyStatus = document.getElementById("emergencyStatus");
       const elLayoutStatus = document.getElementById("layoutStatus");
       const elLayoutNextHint = document.getElementById("layoutNextHint");
       const elCameraRows = document.getElementById("cameraRows");
@@ -441,10 +477,40 @@
           .join(" · ")}`;
       }
 
+      function setEmergencyStatus(on) {
+        if (!elEmergencyStatus) return;
+        if (on) {
+          elEmergencyStatus.textContent = "ACTIVE — wall shows stop.png; session paused.";
+          elEmergencyStatus.classList.add("is-active");
+        } else {
+          elEmergencyStatus.textContent = "Idle — wall running normally.";
+          elEmergencyStatus.classList.remove("is-active");
+        }
+        if (btnEmergencyStop) btnEmergencyStop.disabled = on;
+        if (btnEmergencyResume) btnEmergencyResume.disabled = !on;
+      }
+
+      function setEmergencyStop(on, reason) {
+        const prev = readState();
+        if ((prev.emergencyStop === true) === on) {
+          setUIFromState(prev);
+          return;
+        }
+        const next = writeState({ ...prev, emergencyStop: on });
+        setUIFromState(next);
+        broadcast(next);
+        logControlEvent(on ? "emergency_stop" : "emergency_resume", {
+          reason: reason || "control",
+          message: on ? "stop" : "resume",
+        });
+      }
+
       function setUIFromState(s) {
         elParticipant.value = s.participantId || "";
         if (elRandomizeLayout) elRandomizeLayout.checked = s.randomizeLayout !== false;
         if (elShowCoderHud) elShowCoderHud.checked = s.showCoderHud === true;
+        if (elLockFullscreen) elLockFullscreen.checked = s.lockFullscreen !== false;
+        setEmergencyStatus(s.emergencyStop === true);
         if (elTapCooldownMs) {
           elTapCooldownMs.value = String(
             s.tapCooldownMs ?? (WALL_DEFAULTS && WALL_DEFAULTS.tapCooldownMs) ?? 2000
@@ -472,18 +538,36 @@
       }
 
       function setActiveUser(pid, reason, key) {
+        const ensurePresent =
+          (CZTV && CZTV.ensurePresentIncludes) ||
+          ((presentIds, participantId) => {
+            const list = normalizePresentIds(presentIds);
+            if (!participantId || list.includes(participantId)) return list;
+            return normalizePresentIds([...list, participantId]);
+          });
         const prev = readState();
-        if ((prev.participantId || "") === pid) {
+        const prevPresent = normalizePresentIds(prev.presentIds);
+        const presentIds = ensurePresent(prevPresent, pid);
+        const newlyPresent = Boolean(pid) && !prevPresent.includes(pid);
+        if ((prev.participantId || "") === pid && !newlyPresent) {
           setUIFromState(prev);
           return;
         }
-        const next = writeState({ ...prev, participantId: pid });
+        const next = writeState({ ...prev, participantId: pid, presentIds });
         setUIFromState(next);
         broadcast(next);
-        logControlEvent("active_user_set", {
-          reason,
-          message: `${prev.participantId || "—"}→${pid}`,
-        });
+        if ((prev.participantId || "") !== pid) {
+          logControlEvent("active_user_set", {
+            reason,
+            message: `${prev.participantId || "—"}→${pid}`,
+          });
+        }
+        if (newlyPresent) {
+          logControlEvent("presence_on", {
+            reason: reason ? `${reason}+active` : "active",
+            message: pid,
+          });
+        }
       }
 
       function togglePresence(pid, reason, key) {
@@ -653,18 +737,11 @@
         broadcast(s);
 
         elParticipant.addEventListener("change", () => {
-          const prev = readState();
           const nextId = elParticipant.value.trim();
-          pushUpdate({ participantId: nextId });
-          if ((prev.participantId || "") !== nextId) {
-            logControlEvent("active_user_set", {
-              reason: "form",
-              message: `${prev.participantId || "—"}→${nextId}`,
-            });
-          }
+          setActiveUser(nextId, "form");
         });
         elParticipant.addEventListener("blur", () => {
-          pushUpdate({ participantId: elParticipant.value.trim() });
+          setActiveUser(elParticipant.value.trim(), "form");
         });
 
         if (elRandomizeLayout) {
@@ -682,6 +759,23 @@
           elShowCoderHud.addEventListener("change", () => {
             pushUpdate({ showCoderHud: elShowCoderHud.checked });
           });
+        }
+
+        if (elLockFullscreen) {
+          elLockFullscreen.addEventListener("change", () => {
+            pushUpdate({ lockFullscreen: elLockFullscreen.checked });
+            logControlEvent("fullscreen_lock_toggle", {
+              reason: "control",
+              message: elLockFullscreen.checked ? "locked" : "unlocked",
+            });
+          });
+        }
+
+        if (btnEmergencyStop) {
+          btnEmergencyStop.addEventListener("click", () => setEmergencyStop(true, "control_btn"));
+        }
+        if (btnEmergencyResume) {
+          btnEmergencyResume.addEventListener("click", () => setEmergencyStop(false, "control_btn"));
         }
 
         function pushWallBehaviourFromInputs() {
@@ -703,6 +797,13 @@
 
         document.addEventListener("keydown", (e) => {
           if (isTypingTarget(e.target)) return;
+          const key = String(e.key || "").toLowerCase();
+          if (key === "x" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+            e.preventDefault();
+            const on = readState().emergencyStop === true;
+            setEmergencyStop(!on, "hotkey_x");
+            return;
+          }
           const hit = resolvePidHotkey(e);
           if (!hit) return;
           e.preventDefault();

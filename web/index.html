@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <title>CZTV — Camera Panel Prototype</title>
     <style>
       :root {
@@ -11,14 +14,21 @@
         --muted: #a7b3cc;
         --gap: 0px;
         --radius: 0px;
+        --chrome-shield: 72px;
       }
       html,
       body {
         height: 100%;
         margin: 0;
+        overflow: hidden;
+        overscroll-behavior: none;
+        touch-action: none;
         font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, "Noto Sans";
         background: var(--bg);
         color: var(--text);
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
       }
       .app {
         height: 100%;
@@ -85,6 +95,47 @@
       }
       .maximized .tile[data-max="true"] {
         display: grid;
+      }
+
+      /* Absorbs top-edge swipes that would reveal browser chrome in non-kiosk fullscreen. */
+      #chromeShield {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: var(--chrome-shield);
+        z-index: 12000;
+        background: transparent;
+        touch-action: none;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      #chromeShield[hidden] {
+        display: none;
+      }
+
+      /* Emergency stop.png — covers everything until researcher resumes. */
+      #stopScreen[hidden] {
+        display: none;
+      }
+      #stopScreen {
+        position: fixed;
+        inset: 0;
+        z-index: 14000;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        background: #000;
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+      #stopScreen img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+        pointer-events: none;
       }
 
       /* Full-screen home / start image (tap to enter wall; hotkey b to return). */
@@ -192,8 +243,14 @@
       </main>
     </div>
 
+    <div id="chromeShield" hidden aria-hidden="true" title="Top-edge guard"></div>
+
     <div id="homeScreen" role="button" aria-label="Start screen — tap to open wall" tabindex="0">
       <img src="/media/placeholder.png" alt="" draggable="false" />
+    </div>
+
+    <div id="stopScreen" hidden aria-label="Emergency stop" aria-live="assertive">
+      <img src="/media/stop.png" alt="Stop" draggable="false" />
     </div>
 
     <div id="startOverlay" hidden>
@@ -207,7 +264,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script src="cztv-shared.js?v=9"></script>
+    <script src="cztv-shared.js?v=13"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
       const coderHud = document.getElementById("coderHud");
@@ -228,10 +285,12 @@
       const readState =
         CZTV.readState ||
         (() => ({
-          participantId: "",
+          participantId: "PX",
           presentIds: [],
           randomizeLayout: true,
           showCoderHud: false,
+          lockFullscreen: true,
+          emergencyStop: false,
           tapCooldownMs: 2000,
           edgeDeadZonePx: 48,
           idleResetMs: 300000,
@@ -461,8 +520,9 @@
       const homeScreen = document.getElementById("homeScreen");
       let onHomeScreen = true;
 
-      /** What is on screen right now: start | wall | maximized content label. */
+      /** What is on screen right now: stop | start | wall | maximized content label. */
       function currentScreenLabel() {
+        if (runtimeState && runtimeState.emergencyStop === true) return "stop";
         if (onHomeScreen) return "start";
         if (!document.body.classList.contains("maximized")) return "wall";
         const active = document.querySelector('.tile[data-max="true"]');
@@ -479,6 +539,12 @@
         }
         if (type === "home_show") return "start_enter";
         if (type === "home_hide") return "start_exit";
+        if (type === "webcam_start") return "webcam_start";
+        if (type === "webcam_stop") return "webcam_stop";
+        if (type === "webcam_error") return "webcam_error";
+        if (type === "emergency_stop") return "emergency_stop";
+        if (type === "emergency_resume") return "emergency_resume";
+        if (type === "fullscreen_lock_toggle") return "fullscreen_lock_toggle";
         if (type === "video_clip_start") return "clip_start";
         if (type === "live_tile_ready") return "live_ready";
         if (type === "active_user_set") return "active_user_set";
@@ -490,7 +556,422 @@
         return type || "";
       }
 
+      // USB webcam session recording (active while engagement screen is dismissed).
+      // Chunks are uploaded continuously — whole-file POST+keepalive was failing (~64KB limit).
+      let webcamStream = null;
+      let mediaRecorder = null;
+      let recordingStartedAt = null;
+      let recordingActive = false;
+      let recordingId = null;
+      let recordingFilename = "";
+      let recordingQueue = Promise.resolve();
+      let chunkUploadQueue = Promise.resolve();
+
+      function pickRecorderMime() {
+        const candidates = [
+          "video/webm;codecs=vp9,opus",
+          "video/webm;codecs=vp8,opus",
+          "video/webm;codecs=vp9",
+          "video/webm;codecs=vp8",
+          "video/webm",
+        ];
+        for (const t of candidates) {
+          try {
+            if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
+          } catch {
+            /* ignore */
+          }
+        }
+        return "";
+      }
+
+      function stampForFilename(iso) {
+        return String(iso || nowIso())
+          .replace(/[:.]/g, "")
+          .replace(/T/g, "_")
+          .replace(/Z$/i, "");
+      }
+
+      function enqueueChunkUpload(blob) {
+        if (!blob || !blob.size || !recordingId) return;
+        const id = recordingId;
+        chunkUploadQueue = chunkUploadQueue
+          .then(async () => {
+            const res = await fetch(`/api/recording/chunk?id=${encodeURIComponent(id)}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/octet-stream" },
+              body: blob,
+            });
+            if (!res.ok) {
+              throw new Error(`chunk_upload_${res.status}`);
+            }
+          })
+          .catch((err) => {
+            logEvent("webcam_error", {
+              message: String(err && err.message ? err.message : err),
+            });
+          });
+      }
+
+      function startWebcamRecording() {
+        recordingQueue = recordingQueue
+          .then(async () => {
+            if (recordingActive) return;
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+              logEvent("webcam_error", { message: "getUserMedia unavailable" });
+              return;
+            }
+            if (typeof MediaRecorder === "undefined") {
+              logEvent("webcam_error", { message: "MediaRecorder unavailable" });
+              return;
+            }
+
+            let stream;
+            try {
+              try {
+                stream = await navigator.mediaDevices.getUserMedia({
+                  video: { width: { ideal: 1280 }, height: { ideal: 720 } },
+                  audio: true,
+                });
+              } catch {
+                stream = await navigator.mediaDevices.getUserMedia({
+                  video: true,
+                  audio: false,
+                });
+              }
+            } catch (err) {
+              logEvent("webcam_error", {
+                message: String(err && err.message ? err.message : err),
+              });
+              return;
+            }
+
+            recordingStartedAt = nowIso();
+            const filename = `webcam_${sessionId}_${stampForFilename(recordingStartedAt)}.webm`;
+            const mimeType = pickRecorderMime();
+
+            let opened;
+            try {
+              const qs = new URLSearchParams({
+                sessionId,
+                startedAt: recordingStartedAt,
+                filename,
+              });
+              const res = await fetch(`/api/recording/start?${qs.toString()}`, {
+                method: "POST",
+                headers: { "Content-Type": mimeType || "video/webm" },
+              });
+              opened = await res.json();
+              if (!res.ok || !opened || !opened.ok || !opened.id) {
+                throw new Error((opened && opened.error) || `start_failed_${res.status}`);
+              }
+            } catch (err) {
+              stream.getTracks().forEach((t) => t.stop());
+              logEvent("webcam_error", {
+                message: String(err && err.message ? err.message : err),
+              });
+              return;
+            }
+
+            recordingId = opened.id;
+            recordingFilename = opened.filename || filename;
+            webcamStream = stream;
+            chunkUploadQueue = Promise.resolve();
+
+            const opts = mimeType
+              ? { mimeType, videoBitsPerSecond: 2_500_000 }
+              : { videoBitsPerSecond: 2_500_000 };
+            let recorder;
+            try {
+              recorder = new MediaRecorder(stream, opts);
+            } catch (err) {
+              stream.getTracks().forEach((t) => t.stop());
+              webcamStream = null;
+              try {
+                await fetch(`/api/recording/finish?id=${encodeURIComponent(recordingId)}`, {
+                  method: "POST",
+                });
+              } catch {
+                /* ignore */
+              }
+              recordingId = null;
+              logEvent("webcam_error", {
+                message: String(err && err.message ? err.message : err),
+              });
+              return;
+            }
+
+            mediaRecorder = recorder;
+            recorder.ondataavailable = (e) => {
+              if (e.data && e.data.size > 0) enqueueChunkUpload(e.data);
+            };
+            recorder.onerror = (e) => {
+              logEvent("webcam_error", {
+                message: String((e && e.error && e.error.message) || e.error || e),
+              });
+            };
+            try {
+              // 2s timeslices → small POSTs that survive reliably (unlike one giant upload).
+              recorder.start(2000);
+            } catch (err) {
+              stream.getTracks().forEach((t) => t.stop());
+              webcamStream = null;
+              mediaRecorder = null;
+              try {
+                await fetch(`/api/recording/finish?id=${encodeURIComponent(recordingId)}`, {
+                  method: "POST",
+                });
+              } catch {
+                /* ignore */
+              }
+              recordingId = null;
+              logEvent("webcam_error", {
+                message: String(err && err.message ? err.message : err),
+              });
+              return;
+            }
+            recordingActive = true;
+            logEvent("webcam_start", {
+              reason: "active",
+              message: recordingFilename,
+              screen: "wall",
+              event: "webcam_start",
+            });
+          })
+          .catch((err) => {
+            logEvent("webcam_error", {
+              message: String(err && err.message ? err.message : err),
+            });
+          });
+        return recordingQueue;
+      }
+
+      function stopWebcamRecording(reason) {
+        recordingQueue = recordingQueue
+          .then(async () => {
+            const recorder = mediaRecorder;
+            const stream = webcamStream;
+            const id = recordingId;
+            const savedName = recordingFilename;
+            mediaRecorder = null;
+            webcamStream = null;
+            recordingStartedAt = null;
+            recordingId = null;
+            recordingFilename = "";
+            recordingActive = false;
+
+            if (!recorder && !id) {
+              if (stream) stream.getTracks().forEach((t) => t.stop());
+              return;
+            }
+
+            if (recorder && recorder.state !== "inactive") {
+              await new Promise((resolve) => {
+                recorder.addEventListener("stop", resolve, { once: true });
+                try {
+                  recorder.stop();
+                } catch {
+                  resolve();
+                }
+              });
+            }
+
+            // Let the final ondataavailable chunk enqueue, then drain uploads.
+            await new Promise((r) => setTimeout(r, 50));
+            await chunkUploadQueue.catch(() => {});
+
+            if (stream) stream.getTracks().forEach((t) => t.stop());
+
+            if (!id) {
+              logEvent("webcam_stop", {
+                reason: reason || "stop",
+                message: "no_id",
+                event: "webcam_stop",
+              });
+              return;
+            }
+
+            try {
+              const res = await fetch(`/api/recording/finish?id=${encodeURIComponent(id)}`, {
+                method: "POST",
+              });
+              let ok = res.ok;
+              let filename = savedName;
+              try {
+                const j = await res.json();
+                if (j && j.filename) filename = j.filename;
+                if (j && j.ok === false) ok = false;
+                if (ok && j && j.bytes != null) {
+                  filename = `${filename} (${j.bytes} bytes)`;
+                }
+              } catch {
+                /* ignore */
+              }
+              logEvent("webcam_stop", {
+                reason: reason || "stop",
+                message: ok ? filename : `finish_failed_${res.status}`,
+                event: "webcam_stop",
+                href: ok ? `logs/recordings/${savedName}` : "",
+              });
+            } catch (err) {
+              logEvent("webcam_error", {
+                reason: reason || "stop",
+                message: String(err && err.message ? err.message : err),
+                event: "webcam_error",
+              });
+            }
+          })
+          .catch((err) => {
+            logEvent("webcam_error", {
+              reason: reason || "stop",
+              message: String(err && err.message ? err.message : err),
+            });
+          });
+        return recordingQueue;
+      }
+
+      // Fullscreen lock (control panel / Ctrl+Shift+F). Active on engagement + wall when enabled.
+      let fullscreenRetryTimer = 0;
+      const chromeShield = document.getElementById("chromeShield");
+      const stopScreen = document.getElementById("stopScreen");
+      let emergencyUiOn = false;
+
+      function isFullscreenLocked() {
+        return runtimeState.lockFullscreen !== false;
+      }
+
+      function isEmergencyStop() {
+        return runtimeState.emergencyStop === true;
+      }
+
+      function isDocumentFullscreen() {
+        return Boolean(
+          document.fullscreenElement ||
+            document.webkitFullscreenElement ||
+            document.msFullscreenElement
+        );
+      }
+
+      function requestWallFullscreen() {
+        if (!isFullscreenLocked()) return Promise.resolve();
+        const el = document.documentElement;
+        const req =
+          el.requestFullscreen ||
+          el.webkitRequestFullscreen ||
+          el.msRequestFullscreen;
+        if (!req) return Promise.resolve();
+        try {
+          const p = req.call(el);
+          return p && typeof p.then === "function" ? p.catch(() => {}) : Promise.resolve();
+        } catch {
+          return Promise.resolve();
+        }
+      }
+
+      function scheduleFullscreenRetry() {
+        if (!isFullscreenLocked()) return;
+        if (fullscreenRetryTimer) window.clearTimeout(fullscreenRetryTimer);
+        fullscreenRetryTimer = window.setTimeout(() => {
+          fullscreenRetryTimer = 0;
+          if (!isFullscreenLocked() || isDocumentFullscreen()) return;
+          requestWallFullscreen();
+        }, 400);
+      }
+
+      function syncFullscreenLockUi() {
+        if (chromeShield) chromeShield.hidden = !isFullscreenLocked();
+        if (isFullscreenLocked() && !isDocumentFullscreen()) {
+          scheduleFullscreenRetry();
+        }
+      }
+
+      function pauseAllFeeds() {
+        document.querySelectorAll("video.feed").forEach((v) => {
+          try {
+            v.pause();
+          } catch {
+            /* ignore */
+          }
+        });
+      }
+
+      function resumeAllFeeds() {
+        document.querySelectorAll("video.feed").forEach((v) => {
+          try {
+            const p = v.play();
+            if (p && typeof p.catch === "function") p.catch(() => {});
+          } catch {
+            /* ignore */
+          }
+        });
+      }
+
+      function syncEmergencyUi() {
+        const want = isEmergencyStop();
+        if (stopScreen) stopScreen.hidden = !want;
+        if (want === emergencyUiOn) return;
+        emergencyUiOn = want;
+        if (want) {
+          stopWebcamRecording("emergency");
+          pauseAllFeeds();
+        } else {
+          resumeAllFeeds();
+          if (!onHomeScreen) startWebcamRecording();
+        }
+      }
+
+      function setEmergencyStop(on, reason) {
+        if ((runtimeState.emergencyStop === true) === on) {
+          syncEmergencyUi();
+          return;
+        }
+        runtimeState = writeState({ ...runtimeState, emergencyStop: on });
+        broadcastState(runtimeState);
+        syncEmergencyUi();
+        logEvent(on ? "emergency_stop" : "emergency_resume", {
+          reason: reason || "toggle",
+          message: on ? "stop" : "resume",
+          screen: on ? "stop" : currentScreenLabel(),
+          event: on ? "emergency_stop" : "emergency_resume",
+        });
+      }
+
+      function setFullscreenLock(on, reason) {
+        if ((runtimeState.lockFullscreen !== false) === on) {
+          syncFullscreenLockUi();
+          return;
+        }
+        runtimeState = writeState({ ...runtimeState, lockFullscreen: on });
+        broadcastState(runtimeState);
+        syncFullscreenLockUi();
+        if (on) requestWallFullscreen();
+        logEvent("fullscreen_lock_toggle", {
+          reason: reason || "toggle",
+          message: on ? "locked" : "unlocked",
+        });
+      }
+
+      document.addEventListener("fullscreenchange", () => {
+        if (!isDocumentFullscreen() && isFullscreenLocked()) scheduleFullscreenRetry();
+      });
+      document.addEventListener("webkitfullscreenchange", () => {
+        if (!isDocumentFullscreen() && isFullscreenLocked()) scheduleFullscreenRetry();
+      });
+
+      // Block right-click / long-press menus that open browser UI.
+      document.addEventListener("contextmenu", (e) => e.preventDefault());
+
+      // Any gesture can satisfy the fullscreen user-activation requirement when lock is on.
+      document.addEventListener(
+        "pointerdown",
+        () => {
+          if (isFullscreenLocked() && !isDocumentFullscreen()) requestWallFullscreen();
+        },
+        { passive: true }
+      );
+
       function showHomeScreen(reason) {
+        if (isEmergencyStop()) return;
         if (onHomeScreen && homeScreen && !homeScreen.hidden) return;
         // Leave any maximized tile before covering the wall.
         if (document.body.classList.contains("maximized")) {
@@ -498,7 +979,9 @@
         }
         onHomeScreen = true;
         if (homeScreen) homeScreen.hidden = false;
+        syncFullscreenLockUi();
         noteActivity();
+        stopWebcamRecording(reason || "home");
         logEvent("home_show", {
           reason: reason || "show",
           screen: "start",
@@ -507,22 +990,29 @@
       }
 
       function hideHomeScreen(reason) {
+        if (isEmergencyStop()) return;
         if (!onHomeScreen && homeScreen && homeScreen.hidden) return;
         onHomeScreen = false;
         if (homeScreen) homeScreen.hidden = true;
+        syncFullscreenLockUi();
         noteActivity();
         logEvent("home_hide", {
           reason: reason || "tap",
           screen: "wall",
           event: "start_exit",
         });
+        // User gesture: safe place to enter fullscreen + start webcam.
+        if (isFullscreenLocked()) requestWallFullscreen();
+        startWebcamRecording();
         if (!wallStarted) startWall();
       }
 
       function handleHomePointer() {
+        if (isEmergencyStop()) return;
         if (!onHomeScreen) return;
         if (inCooldown()) return;
         markTap();
+        if (isFullscreenLocked()) requestWallFullscreen();
         hideHomeScreen("tap");
       }
 
@@ -565,6 +1055,8 @@
       // Begin on the start image; wall media preloads underneath.
       onHomeScreen = true;
       if (homeScreen) homeScreen.hidden = false;
+      syncFullscreenLockUi();
+      syncEmergencyUi();
       logEvent("app_start", { href: location.href, screen: "start" });
       logEvent("layout_assigned", { screen: "start" });
       logEvent("home_show", { reason: "app_start", screen: "start", event: "start_enter" });
@@ -601,6 +1093,7 @@
       }
 
       function handleTilePointer(tileEl, clientX, clientY) {
+        if (isEmergencyStop()) return;
         if (onHomeScreen) return;
         if (inCooldown()) return;
         // When maximized, whole screen is one tile — no edge dead-zone.
@@ -624,6 +1117,7 @@
       });
 
       setInterval(() => {
+        if (isEmergencyStop()) return;
         if (onHomeScreen) return;
         if (!document.body.classList.contains("maximized")) return;
         if (Date.now() - lastActivityAt < idleResetMs()) return;
@@ -640,19 +1134,37 @@
       }
 
       function setActiveUser(pid, reason, key) {
+        const ensurePresent =
+          (CZTV && CZTV.ensurePresentIncludes) ||
+          ((presentIds, participantId) => {
+            const list = normalizePresentIds(presentIds);
+            if (!participantId || list.includes(participantId)) return list;
+            return normalizePresentIds([...list, participantId]);
+          });
         const prev = runtimeState.participantId || "";
-        if (prev === pid) {
+        const prevPresent = normalizePresentIds(runtimeState.presentIds);
+        const presentIds = ensurePresent(prevPresent, pid);
+        const newlyPresent = Boolean(pid) && !prevPresent.includes(pid);
+        if (prev === pid && !newlyPresent) {
           updateCoderHud();
           return runtimeState;
         }
-        runtimeState = writeState({ ...runtimeState, participantId: pid });
+        runtimeState = writeState({ ...runtimeState, participantId: pid, presentIds });
         updateCoderHud();
         broadcastState(runtimeState);
         noteActivity();
-        logEvent("active_user_set", {
-          reason,
-          message: `${prev || "—"}→${pid}`,
-        });
+        if (prev !== pid) {
+          logEvent("active_user_set", {
+            reason,
+            message: `${prev || "—"}→${pid}`,
+          });
+        }
+        if (newlyPresent) {
+          logEvent("presence_on", {
+            reason: reason ? `${reason}+active` : "active",
+            message: pid,
+          });
+        }
         return runtimeState;
       }
 
@@ -677,6 +1189,22 @@
         if (isTypingTarget(e.target)) return;
         const key = String(e.key || "").toLowerCase();
 
+        // Ctrl+Shift+F → toggle fullscreen lock (same as control panel)
+        if (key === "f" && e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey) {
+          e.preventDefault();
+          setFullscreenLock(!isFullscreenLocked(), "hotkey");
+          return;
+        }
+
+        // x → emergency stop / resume
+        if (key === "x" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+          e.preventDefault();
+          setEmergencyStop(!isEmergencyStop(), "hotkey_x");
+          return;
+        }
+
+        if (isEmergencyStop()) return;
+
         // b → return to full-screen start image
         if (key === "b" && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
           e.preventDefault();
@@ -687,6 +1215,11 @@
         }
 
         if (e.key === "Escape") {
+          // While locked, ignore Esc so chimps can't leave fullscreen / deselect via browser.
+          if (isFullscreenLocked()) {
+            e.preventDefault();
+            return;
+          }
           if (onHomeScreen) return;
           if (!inCooldown()) {
             markTap();
@@ -720,6 +1253,12 @@
           }
         });
       }
+
+      window.addEventListener("pagehide", () => {
+        if (recordingActive || mediaRecorder) {
+          stopWebcamRecording("unload");
+        }
+      });
 
       const startOverlay = document.getElementById("startOverlay");
       const startBtn = document.getElementById("btnStart");
@@ -831,8 +1370,8 @@
       }
 
       function showOverlay() {
-        // Keep the home PNG on top; researcher Start is for the wall only.
-        if (onHomeScreen) return;
+        // Keep the home PNG / emergency stop on top; researcher Start is for the wall only.
+        if (onHomeScreen || isEmergencyStop()) return;
         startBtn.textContent = "Start";
         startOverlay.hidden = false;
       }
@@ -1031,6 +1570,8 @@
         // randomizeLayout changes apply on the next wall page load (not mid-session).
         runtimeState = writeState(next);
         updateCoderHud();
+        syncFullscreenLockUi();
+        syncEmergencyUi();
       }
 
       if (bc) {

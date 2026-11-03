@@ -10,6 +10,7 @@ const mediaRoot = path.join(repoRoot, "media");
 const webMediaRoot = path.join(webRoot, "media");
 const logDir = path.join(repoRoot, "logs");
 const logFile = path.join(logDir, "usage.csv");
+const recordingsDir = path.join(logDir, "recordings");
 
 const CSV_FIELDS = [
   "server_ts",
@@ -174,10 +175,188 @@ function readBody(req) {
   });
 }
 
+function safeRecordingFilename(name, defaultExt) {
+  if (!name) return null;
+  const base = path.basename(name);
+  if (base !== name || base.includes("..")) return null;
+  let finalName = base;
+  const lower = finalName.toLowerCase();
+  if (!lower.endsWith(".webm") && !lower.endsWith(".mp4") && !lower.endsWith(".ogg")) {
+    finalName = `${finalName}${defaultExt}`;
+  }
+  const stem = path.parse(finalName).name;
+  if (!stem.startsWith("webcam_")) return null;
+  if (!/^[a-zA-Z0-9\-_.]+$/.test(finalName)) return null;
+  return finalName;
+}
+
+function sendJson(res, status, obj) {
+  const payload = JSON.stringify(obj);
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(payload);
+}
+
+function uniqueRecordingPath(safe) {
+  let out = path.join(recordingsDir, safe);
+  if (!fs.existsSync(out)) return { out, safe };
+  const parsed = path.parse(safe);
+  let n = 2;
+  while (true) {
+    const candidateName = `${parsed.name}_${n}${parsed.ext}`;
+    const candidate = path.join(recordingsDir, candidateName);
+    if (!fs.existsSync(candidate)) return { out: candidate, safe: candidateName };
+    n += 1;
+  }
+}
+
+/** @type {Map<string, { fd: number, path: string, filename: string, bytes: number, sessionId: string, startedAt: string }>} */
+const openRecordings = new Map();
+
 migrateLogCsvIfNeeded();
+fs.mkdirSync(recordingsDir, { recursive: true });
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
+
+  if (
+    req.method === "POST" &&
+    (url.pathname === "/api/recording" ||
+      url.pathname === "/api/recording/start" ||
+      url.pathname === "/api/recording/chunk" ||
+      url.pathname === "/api/recording/finish")
+  ) {
+    try {
+      const sessionId = (url.searchParams.get("sessionId") || "").trim();
+      const startedAt = (url.searchParams.get("startedAt") || "").trim();
+      const requested = (url.searchParams.get("filename") || "").trim();
+      const ctype = String(req.headers["content-type"] || "video/webm")
+        .split(";")[0]
+        .trim()
+        .toLowerCase();
+      let ext = ".webm";
+      if (ctype.includes("mp4")) ext = ".mp4";
+      else if (ctype.includes("ogg")) ext = ".ogg";
+
+      if (url.pathname === "/api/recording/start") {
+        await readBody(req);
+        let safe = safeRecordingFilename(requested, ext);
+        if (!safe) {
+          const stamp = new Date().toISOString().replace(/[:.]/g, "").replace("Z", "");
+          const sid = (sessionId.replace(/[^a-zA-Z0-9\-_]/g, "") || "session").slice(0, 64);
+          safe = `webcam_${sid}_${stamp}${ext}`;
+        }
+        fs.mkdirSync(recordingsDir, { recursive: true });
+        const uniq = uniqueRecordingPath(safe);
+        const fd = fs.openSync(uniq.out, "w");
+        const id = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+        openRecordings.set(id, {
+          fd,
+          path: uniq.out,
+          filename: uniq.safe,
+          bytes: 0,
+          sessionId,
+          startedAt,
+        });
+        console.log(`Opened webcam recording: ${uniq.out}`);
+        sendJson(res, 200, {
+          ok: true,
+          id,
+          filename: uniq.safe,
+          path: uniq.out,
+          sessionId,
+          startedAt,
+        });
+        return;
+      }
+
+      if (url.pathname === "/api/recording/chunk") {
+        const id = (url.searchParams.get("id") || "").trim();
+        const raw = await readBody(req);
+        const entry = openRecordings.get(id);
+        if (!entry) {
+          sendJson(res, 404, { ok: false, error: "unknown recording id" });
+          return;
+        }
+        if (raw.length) {
+          fs.writeSync(entry.fd, raw);
+          entry.bytes += raw.length;
+        }
+        sendJson(res, 200, { ok: true, id, bytes: entry.bytes });
+        return;
+      }
+
+      if (url.pathname === "/api/recording/finish") {
+        const id = (url.searchParams.get("id") || "").trim();
+        const raw = await readBody(req);
+        const entry = openRecordings.get(id);
+        if (!entry) {
+          sendJson(res, 404, { ok: false, error: "unknown recording id" });
+          return;
+        }
+        openRecordings.delete(id);
+        if (raw.length) {
+          fs.writeSync(entry.fd, raw);
+          entry.bytes += raw.length;
+        }
+        fs.closeSync(entry.fd);
+        let size = entry.bytes;
+        try {
+          size = fs.statSync(entry.path).size;
+        } catch {
+          /* ignore */
+        }
+        if (size <= 0) {
+          try {
+            fs.unlinkSync(entry.path);
+          } catch {
+            /* ignore */
+          }
+          sendJson(res, 400, { ok: false, error: "empty recording" });
+          return;
+        }
+        console.log(`Saved webcam recording: ${entry.path} (${size} bytes)`);
+        sendJson(res, 200, {
+          ok: true,
+          id,
+          filename: entry.filename,
+          path: entry.path,
+          bytes: size,
+          sessionId: entry.sessionId,
+          startedAt: entry.startedAt,
+        });
+        return;
+      }
+
+      // Legacy whole-file upload.
+      let safe = safeRecordingFilename(requested, ext);
+      if (!safe) {
+        const stamp = new Date().toISOString().replace(/[:.]/g, "").replace("Z", "");
+        const sid = (sessionId.replace(/[^a-zA-Z0-9\-_]/g, "") || "session").slice(0, 64);
+        safe = `webcam_${sid}_${stamp}${ext}`;
+      }
+      const raw = await readBody(req);
+      if (!raw.length) {
+        sendJson(res, 400, { ok: false, error: "empty body" });
+        return;
+      }
+      fs.mkdirSync(recordingsDir, { recursive: true });
+      const uniq = uniqueRecordingPath(safe);
+      fs.writeFileSync(uniq.out, raw);
+      console.log(`Saved webcam recording: ${uniq.out} (${raw.length} bytes)`);
+      sendJson(res, 200, {
+        ok: true,
+        filename: uniq.safe,
+        path: uniq.out,
+        bytes: raw.length,
+        sessionId,
+        startedAt,
+      });
+      return;
+    } catch (e) {
+      sendJson(res, 500, { ok: false, error: String(e && e.message ? e.message : e) });
+      return;
+    }
+  }
 
   if (req.method === "POST" && url.pathname === "/log") {
     try {
@@ -233,6 +412,7 @@ const server = http.createServer(async (req, res) => {
         })
       ),
       logFile,
+      recordingsDir,
       log_header_first_line: logHeader,
       expected_csv_header: EXPECTED_CSV_HEADER,
     };
@@ -314,4 +494,5 @@ server.listen(port, "127.0.0.1", () => {
   console.log(`Media search order: ${mediaRoot} then ${webMediaRoot} at /media/`);
   console.log(`Open http://localhost:${port}/`);
   console.log(`Logging POST /log -> ${logFile}`);
+  console.log(`Recordings POST /api/recording -> ${recordingsDir}`);
 });

@@ -6,10 +6,12 @@ import json
 import mimetypes
 import os
 import shutil
+import threading
+import uuid
 from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 MEDIA_MIME = {
     ".mp4": "video/mp4",
@@ -37,6 +39,11 @@ REPO_ROOT = ROOT.parent
 MEDIA_ROOT = (REPO_ROOT / "media").resolve()
 LOG_DIR = REPO_ROOT / "logs"
 LOG_FILE = LOG_DIR / "usage.csv"
+RECORDINGS_DIR = LOG_DIR / "recordings"
+
+# Open chunked webcam recordings: id -> {path, file, bytes}
+_RECORDING_LOCK = threading.Lock()
+_OPEN_RECORDINGS: dict[str, dict] = {}
 
 CSV_FIELDS = [
     "server_ts",
@@ -205,6 +212,7 @@ class Handler(SimpleHTTPRequestHandler):
             "media_roots": [str(MEDIA_ROOT), str((ROOT / "media").resolve())],
             "jungle_mp4": {str(p): p.is_file() for p in jungle},
             "log_file": str(LOG_FILE),
+            "recordings_dir": str(RECORDINGS_DIR),
             "log_header_first_line": header_preview,
             "expected_csv_header": EXPECTED_CSV_HEADER,
         }
@@ -330,6 +338,15 @@ class Handler(SimpleHTTPRequestHandler):
                 self._send_json({"ok": False, "error": str(e)}, status=500)
             return
 
+        if parsed.path in (
+            "/api/recording",
+            "/api/recording/start",
+            "/api/recording/chunk",
+            "/api/recording/finish",
+        ):
+            self._handle_recording_api(parsed)
+            return
+
         if parsed.path != "/log":
             self.send_response(404)
             self.end_headers()
@@ -371,18 +388,261 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_response(204)
         self.end_headers()
 
+    def _read_body_bytes(self, max_bytes: int) -> bytes | None:
+        length = int(self.headers.get("content-length", "0") or "0")
+        if length < 0:
+            return None
+        if length > max_bytes:
+            # Drain a little so the client isn't left hanging worse than needed.
+            try:
+                self.rfile.read(min(length, 1024 * 64))
+            except OSError:
+                pass
+            return None
+        if length == 0:
+            return b""
+        chunks: list[bytes] = []
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if remaining > 0:
+            return None
+        return b"".join(chunks)
+
+    def _handle_recording_api(self, parsed) -> None:
+        """Chunked webcam upload: start → chunk* → finish (also accepts legacy single POST)."""
+        qs = parse_qs(parsed.query or "")
+        path = parsed.path
+
+        try:
+            if path == "/api/recording/start":
+                self._recording_start(qs)
+                return
+            if path == "/api/recording/chunk":
+                self._recording_chunk(qs)
+                return
+            if path == "/api/recording/finish":
+                self._recording_finish(qs)
+                return
+            # Legacy whole-file upload (kept for older clients).
+            self._recording_legacy_upload(qs)
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)}, status=500)
+
+    def _recording_start(self, qs: dict) -> None:
+        session_id = (qs.get("sessionId") or [""])[0].strip()
+        started_at = (qs.get("startedAt") or [""])[0].strip()
+        requested = (qs.get("filename") or [""])[0].strip()
+        ctype = (self.headers.get("content-type") or "video/webm").split(";")[0].strip().lower()
+        ext = ".webm"
+        if "mp4" in ctype:
+            ext = ".mp4"
+        elif "ogg" in ctype:
+            ext = ".ogg"
+
+        # Consume empty/unused body if any.
+        self._read_body_bytes(1024 * 1024)
+
+        safe = _safe_recording_filename(requested, ext)
+        if not safe:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+            sid = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "session"
+            safe = f"webcam_{sid}_{stamp}{ext}"
+
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        out = RECORDINGS_DIR / safe
+        if out.exists():
+            stem = out.stem
+            n = 2
+            while True:
+                candidate = RECORDINGS_DIR / f"{stem}_{n}{out.suffix}"
+                if not candidate.exists():
+                    out = candidate
+                    safe = out.name
+                    break
+                n += 1
+
+        rec_id = uuid.uuid4().hex
+        f = out.open("wb")
+        with _RECORDING_LOCK:
+            _OPEN_RECORDINGS[rec_id] = {
+                "path": out,
+                "file": f,
+                "bytes": 0,
+                "sessionId": session_id,
+                "startedAt": started_at,
+                "filename": safe,
+            }
+        print(f"Opened webcam recording: {out}")
+        self._send_json(
+            {
+                "ok": True,
+                "id": rec_id,
+                "filename": safe,
+                "path": str(out),
+                "sessionId": session_id,
+                "startedAt": started_at,
+            }
+        )
+
+    def _recording_chunk(self, qs: dict) -> None:
+        rec_id = (qs.get("id") or [""])[0].strip()
+        raw = self._read_body_bytes(32 * 1024 * 1024)
+        if raw is None:
+            self._send_json({"ok": False, "error": "chunk too large or incomplete"}, status=413)
+            return
+        with _RECORDING_LOCK:
+            entry = _OPEN_RECORDINGS.get(rec_id)
+            if not entry:
+                self._send_json({"ok": False, "error": "unknown recording id"}, status=404)
+                return
+            if raw:
+                entry["file"].write(raw)
+                entry["file"].flush()
+                entry["bytes"] += len(raw)
+            total = entry["bytes"]
+        self._send_json({"ok": True, "id": rec_id, "bytes": total})
+
+    def _recording_finish(self, qs: dict) -> None:
+        rec_id = (qs.get("id") or [""])[0].strip()
+        # Optional final chunk in the finish body.
+        raw = self._read_body_bytes(32 * 1024 * 1024)
+        if raw is None:
+            self._send_json({"ok": False, "error": "finish body incomplete"}, status=400)
+            return
+        with _RECORDING_LOCK:
+            entry = _OPEN_RECORDINGS.pop(rec_id, None)
+        if not entry:
+            self._send_json({"ok": False, "error": "unknown recording id"}, status=404)
+            return
+        try:
+            if raw:
+                entry["file"].write(raw)
+                entry["bytes"] += len(raw)
+            entry["file"].flush()
+            entry["file"].close()
+        except Exception as e:
+            self._send_json({"ok": False, "error": str(e)}, status=500)
+            return
+
+        out: Path = entry["path"]
+        size = entry["bytes"]
+        try:
+            size = out.stat().st_size
+        except OSError:
+            pass
+        if size <= 0:
+            try:
+                out.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self._send_json({"ok": False, "error": "empty recording"}, status=400)
+            return
+
+        print(f"Saved webcam recording: {out} ({size} bytes)")
+        self._send_json(
+            {
+                "ok": True,
+                "id": rec_id,
+                "filename": entry["filename"],
+                "path": str(out),
+                "bytes": size,
+                "sessionId": entry.get("sessionId") or "",
+                "startedAt": entry.get("startedAt") or "",
+            }
+        )
+
+    def _recording_legacy_upload(self, qs: dict) -> None:
+        """Single-shot whole-file upload (may fail for large videos in some browsers)."""
+        requested = (qs.get("filename") or [""])[0].strip()
+        session_id = (qs.get("sessionId") or [""])[0].strip()
+        started_at = (qs.get("startedAt") or [""])[0].strip()
+
+        ctype = (self.headers.get("content-type") or "video/webm").split(";")[0].strip().lower()
+        ext = ".webm"
+        if "mp4" in ctype:
+            ext = ".mp4"
+        elif "ogg" in ctype:
+            ext = ".ogg"
+
+        safe = _safe_recording_filename(requested, ext)
+        if not safe:
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S")
+            sid = "".join(c for c in session_id if c.isalnum() or c in "-_")[:64] or "session"
+            safe = f"webcam_{sid}_{stamp}{ext}"
+
+        raw = self._read_body_bytes(2 * 1024 * 1024 * 1024)
+        if raw is None:
+            self._send_json({"ok": False, "error": "recording too large or incomplete"}, status=413)
+            return
+        if not raw:
+            self._send_json({"ok": False, "error": "empty body"}, status=400)
+            return
+
+        RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+        out = RECORDINGS_DIR / safe
+        if out.exists():
+            stem = out.stem
+            n = 2
+            while True:
+                candidate = RECORDINGS_DIR / f"{stem}_{n}{out.suffix}"
+                if not candidate.exists():
+                    out = candidate
+                    safe = out.name
+                    break
+                n += 1
+
+        out.write_bytes(raw)
+        print(f"Saved webcam recording: {out} ({len(raw)} bytes)")
+        self._send_json(
+            {
+                "ok": True,
+                "filename": safe,
+                "path": str(out),
+                "bytes": len(raw),
+                "sessionId": session_id,
+                "startedAt": started_at,
+            }
+        )
+
     def log_message(self, format, *args):
         return
+
+
+def _safe_recording_filename(name: str, default_ext: str) -> str | None:
+    """Allow only webcam_*.webm/mp4/ogg style names."""
+    if not name:
+        return None
+    base = Path(name).name
+    if base != name or ".." in base:
+        return None
+    lower = base.lower()
+    if not (lower.endswith(".webm") or lower.endswith(".mp4") or lower.endswith(".ogg")):
+        base = f"{base}{default_ext}"
+        lower = base.lower()
+    stem = Path(base).stem
+    if not stem.startswith("webcam_"):
+        return None
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.")
+    if any(c not in allowed for c in base):
+        return None
+    return base
 
 
 def main():
     port = int(os.environ.get("PORT", "8000"))
     migrate_log_csv_if_needed()
+    RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"Serving {ROOT}")
     print(f"Media search order: {MEDIA_ROOT} then {ROOT / 'media'} at /media/")
     print(f"Open http://localhost:{port}/")
     print(f"Logging POST /log -> {LOG_FILE}")
+    print(f"Recordings POST /api/recording -> {RECORDINGS_DIR}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -9,8 +9,12 @@
   /** Defaults for wall interaction / researcher UI (overridable in control panel). */
   const WALL_DEFAULTS = {
     showCoderHud: false,
+    /** Keep browser fullscreen + top-edge shield (incl. engagement screen). */
+    lockFullscreen: true,
+    /** Emergency stop.png overlay; pauses interaction / webcam. */
+    emergencyStop: false,
     tapCooldownMs: 2000,
-    edgeDeadZonePx: 48,
+    edgeDeadZonePx: 36,
     idleResetMs: 5 * 60 * 1000,
   };
 
@@ -195,12 +199,14 @@
 
   function defaultState() {
     return {
-      participantId: "",
+      participantId: "PX",
       presentIds: [],
       // When true: cycle through all 24 placements across sessions (counterbalance).
       // When false: always use DEFAULT_LAYOUT_ORDER.
       randomizeLayout: true,
       showCoderHud: WALL_DEFAULTS.showCoderHud,
+      lockFullscreen: WALL_DEFAULTS.lockFullscreen,
+      emergencyStop: WALL_DEFAULTS.emergencyStop,
       tapCooldownMs: WALL_DEFAULTS.tapCooldownMs,
       edgeDeadZonePx: WALL_DEFAULTS.edgeDeadZonePx,
       idleResetMs: WALL_DEFAULTS.idleResetMs,
@@ -214,10 +220,13 @@
       const o = JSON.parse(raw);
       const d = defaultState();
       return {
-        participantId: normalizeParticipantId(o.participantId),
+        participantId: normalizeParticipantId(o.participantId) || "PX",
         presentIds: normalizePresentIds(o.presentIds),
         randomizeLayout: o.randomizeLayout !== false,
         showCoderHud: o.showCoderHud === true,
+        // Default ON when missing (older saved state).
+        lockFullscreen: o.lockFullscreen !== false,
+        emergencyStop: o.emergencyStop === true,
         tapCooldownMs: clampInt(o.tapCooldownMs, 0, 30000, d.tapCooldownMs),
         edgeDeadZonePx: clampInt(o.edgeDeadZonePx, 0, 400, d.edgeDeadZonePx),
         idleResetMs: clampInt(o.idleResetMs, 10000, 3600000, d.idleResetMs),
@@ -230,16 +239,26 @@
   function writeState(state) {
     const d = defaultState();
     const next = {
-      participantId: normalizeParticipantId(state.participantId),
+      participantId: normalizeParticipantId(state.participantId) || "PX",
       presentIds: normalizePresentIds(state.presentIds),
       randomizeLayout: state.randomizeLayout !== false,
       showCoderHud: state.showCoderHud === true,
+      lockFullscreen: state.lockFullscreen !== false,
+      emergencyStop: state.emergencyStop === true,
       tapCooldownMs: clampInt(state.tapCooldownMs, 0, 30000, d.tapCooldownMs),
       edgeDeadZonePx: clampInt(state.edgeDeadZonePx, 0, 400, d.edgeDeadZonePx),
       idleResetMs: clampInt(state.idleResetMs, 10000, 3600000, d.idleResetMs),
     };
     localStorage.setItem(CZTV_STORAGE_KEY, JSON.stringify(next));
     return next;
+  }
+
+  /** Ensure active user is also listed as present (does not remove anyone). */
+  function ensurePresentIncludes(presentIds, participantId) {
+    const pid = normalizeParticipantId(participantId);
+    const list = normalizePresentIds(presentIds);
+    if (!pid || list.includes(pid)) return list;
+    return normalizePresentIds([...list, pid]);
   }
 
   /** Session id from local day + wall start time, e.g. 2026-10-23_162700 */
@@ -308,6 +327,7 @@
     liveCamerasPayload,
     normalizePresentIds,
     normalizeParticipantId,
+    ensurePresentIncludes,
     normalizeLayoutOrder,
     readLayoutPermIndex,
     writeLayoutPermIndex,
