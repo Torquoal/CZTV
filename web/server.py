@@ -58,6 +58,8 @@ CSV_FIELDS = [
     "viewId",
     "reason",
     "url",
+    "clipFile",
+    "familiarFile",
     "clipIndex",
     "layoutOrder",
     "layoutIndex",
@@ -149,6 +151,9 @@ def event_to_row(e: dict) -> dict:
         "viewId": e.get("viewId") or e.get("setId") or "",
         "reason": e.get("reason", ""),
         "url": e.get("url", ""),
+        "clipFile": e.get("clipFile", "")
+        or (Path(str(e.get("url", ""))).name if e.get("url") else ""),
+        "familiarFile": e.get("familiarFile", ""),
         "clipIndex": clip_index,
         "layoutOrder": layout_order,
         "layoutIndex": e.get("layoutIndex", ""),

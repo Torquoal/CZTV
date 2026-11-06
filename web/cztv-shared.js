@@ -13,6 +13,11 @@
     lockFullscreen: true,
     /** Emergency stop.png overlay; pauses interaction / webcam. */
     emergencyStop: false,
+    /**
+     * When true: maximized view exits only via top-right X button (rest of screen ignores taps).
+     * When false: traditional tap-anywhere-to-return-to-wall.
+     */
+    closeButtonExit: false,
     tapCooldownMs: 2000,
     edgeDeadZonePx: 36,
     idleResetMs: 5 * 60 * 1000,
@@ -207,6 +212,7 @@
       showCoderHud: WALL_DEFAULTS.showCoderHud,
       lockFullscreen: WALL_DEFAULTS.lockFullscreen,
       emergencyStop: WALL_DEFAULTS.emergencyStop,
+      closeButtonExit: WALL_DEFAULTS.closeButtonExit,
       tapCooldownMs: WALL_DEFAULTS.tapCooldownMs,
       edgeDeadZonePx: WALL_DEFAULTS.edgeDeadZonePx,
       idleResetMs: WALL_DEFAULTS.idleResetMs,
@@ -227,9 +233,10 @@
         // Default ON when missing (older saved state).
         lockFullscreen: o.lockFullscreen !== false,
         emergencyStop: o.emergencyStop === true,
+        closeButtonExit: o.closeButtonExit === true,
         tapCooldownMs: clampInt(o.tapCooldownMs, 0, 30000, d.tapCooldownMs),
         edgeDeadZonePx: clampInt(o.edgeDeadZonePx, 0, 400, d.edgeDeadZonePx),
-        idleResetMs: clampInt(o.idleResetMs, 10000, 3600000, d.idleResetMs),
+        idleResetMs: clampInt(o.idleResetMs, 60000, 3600000, d.idleResetMs),
       };
     } catch {
       return defaultState();
@@ -245,9 +252,10 @@
       showCoderHud: state.showCoderHud === true,
       lockFullscreen: state.lockFullscreen !== false,
       emergencyStop: state.emergencyStop === true,
+      closeButtonExit: state.closeButtonExit === true,
       tapCooldownMs: clampInt(state.tapCooldownMs, 0, 30000, d.tapCooldownMs),
       edgeDeadZonePx: clampInt(state.edgeDeadZonePx, 0, 400, d.edgeDeadZonePx),
-      idleResetMs: clampInt(state.idleResetMs, 10000, 3600000, d.idleResetMs),
+      idleResetMs: clampInt(state.idleResetMs, 60000, 3600000, d.idleResetMs),
     };
     localStorage.setItem(CZTV_STORAGE_KEY, JSON.stringify(next));
     return next;

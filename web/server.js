@@ -25,6 +25,8 @@ const CSV_FIELDS = [
   "viewId",
   "reason",
   "url",
+  "clipFile",
+  "familiarFile",
   "clipIndex",
   "layoutOrder",
   "layoutIndex",
@@ -122,6 +124,11 @@ function eventToRow(e) {
   if (typeof randomizeLayout === "boolean") randomizeLayout = randomizeLayout ? "true" : "false";
   else if (randomizeLayout == null) randomizeLayout = "";
   const clipIndex = e.clipIndex ?? e.index ?? "";
+  let clipFile = e.clipFile ?? "";
+  if (!clipFile && e.url) {
+    const parts = String(e.url).split("?")[0].split("#")[0].replace(/\\/g, "/").split("/");
+    clipFile = parts[parts.length - 1] || "";
+  }
   return {
     server_ts: utcIso(),
     client_ts: e.ts ?? "",
@@ -137,6 +144,8 @@ function eventToRow(e) {
     viewId: e.viewId || e.setId || "",
     reason: e.reason ?? "",
     url: e.url ?? "",
+    clipFile,
+    familiarFile: e.familiarFile ?? "",
     clipIndex,
     layoutOrder,
     layoutIndex: e.layoutIndex ?? "",

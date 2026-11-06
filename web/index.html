@@ -51,12 +51,15 @@
         position: relative;
         border-radius: var(--radius);
         overflow: hidden;
-        border: 1px solid rgba(255, 255, 255, 0.06);
-        background: rgba(255, 255, 255, 0.03);
+        border: 0;
+        /* White frame matches touch dead-zone (--tile-inset synced from control panel). */
+        padding: var(--tile-inset, 36px);
+        background: #ffffff;
         display: grid;
         grid-template-rows: 1fr;
         touch-action: manipulation;
         user-select: none;
+        box-sizing: border-box;
       }
       .tileBody {
         position: relative;
@@ -64,6 +67,11 @@
         place-items: center;
         background: #0f1622;
         overflow: hidden;
+        min-height: 0;
+        min-width: 0;
+        width: 100%;
+        height: 100%;
+        border-radius: 2px;
       }
       .placeholder {
         padding: 16px;
@@ -95,6 +103,35 @@
       }
       .maximized .tile[data-max="true"] {
         display: grid;
+      }
+
+      /* Experimental close-button exit (top-right X when maximized). */
+      #maxCloseBtn[hidden] {
+        display: none;
+      }
+      #maxCloseBtn {
+        position: fixed;
+        top: 0;
+        right: 0;
+        width: 200px;
+        height: 200px;
+        z-index: 12500;
+        margin: 0;
+        padding: 24px;
+        border: 0;
+        border-radius: 0;
+        background: #ffffff;
+        cursor: pointer;
+        touch-action: manipulation;
+        box-sizing: border-box;
+        -webkit-tap-highlight-color: transparent;
+      }
+      #maxCloseBtn img {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        display: block;
+        pointer-events: none;
       }
 
       /* Absorbs top-edge swipes that would reveal browser chrome in non-kiosk fullscreen. */
@@ -245,6 +282,10 @@
 
     <div id="chromeShield" hidden aria-hidden="true" title="Top-edge guard"></div>
 
+    <button id="maxCloseBtn" type="button" hidden aria-label="Close maximized view">
+      <img src="/media/stop.png" alt="" draggable="false" />
+    </button>
+
     <div id="homeScreen" role="button" aria-label="Start screen — tap to open wall" tabindex="0">
       <img src="/media/placeholder.png" alt="" draggable="false" />
     </div>
@@ -264,7 +305,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script src="cztv-shared.js?v=13"></script>
+    <script src="cztv-shared.js?v=15"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
       const coderHud = document.getElementById("coderHud");
@@ -291,6 +332,7 @@
           showCoderHud: false,
           lockFullscreen: true,
           emergencyStop: false,
+          closeButtonExit: false,
           tapCooldownMs: 2000,
           edgeDeadZonePx: 48,
           idleResetMs: 300000,
@@ -354,6 +396,8 @@
             .map((v, i) => `${i + 1}=${contentLabelForView(v)}`)
             .join(" · ")}`;
         }
+        syncTileInset();
+        syncMaxCloseButton();
       }
 
       let lastTapAt = 0;
@@ -370,12 +414,17 @@
 
       function edgeDeadZonePx() {
         const n = Number(runtimeState.edgeDeadZonePx);
-        return Number.isFinite(n) ? Math.max(0, n) : 48;
+        return Number.isFinite(n) ? Math.max(0, n) : 36;
       }
 
       function idleResetMs() {
         const n = Number(runtimeState.idleResetMs);
-        return Number.isFinite(n) ? Math.max(10000, n) : 300000;
+        // Floor at 1 minute (control panel minimum).
+        return Number.isFinite(n) ? Math.max(60000, n) : 300000;
+      }
+
+      function syncTileInset() {
+        document.documentElement.style.setProperty("--tile-inset", `${edgeDeadZonePx()}px`);
       }
 
       function inCooldown() {
@@ -535,6 +584,7 @@
         if (type === "tile_minimize") {
           if (reason === "idle") return "idle_timeout";
           if (reason === "esc") return "esc_deselect";
+          if (reason === "close_button") return "close_button";
           return "view_deselected";
         }
         if (type === "home_show") return "start_enter";
@@ -909,6 +959,7 @@
       function syncEmergencyUi() {
         const want = isEmergencyStop();
         if (stopScreen) stopScreen.hidden = !want;
+        syncMaxCloseButton();
         if (want === emergencyUiOn) return;
         emergencyUiOn = want;
         if (want) {
@@ -980,6 +1031,7 @@
         onHomeScreen = true;
         if (homeScreen) homeScreen.hidden = false;
         syncFullscreenLockUi();
+        syncMaxCloseButton();
         noteActivity();
         stopWebcamRecording(reason || "home");
         logEvent("home_show", {
@@ -995,6 +1047,7 @@
         onHomeScreen = false;
         if (homeScreen) homeScreen.hidden = true;
         syncFullscreenLockUi();
+        syncMaxCloseButton();
         noteActivity();
         logEvent("home_hide", {
           reason: reason || "tap",
@@ -1016,6 +1069,15 @@
         hideHomeScreen("tap");
       }
 
+      /** Basename of currently playing familiar (chimp) playlist clip — for participant matching. */
+      let currentFamiliarFile = "";
+
+      function basenameFromUrl(url) {
+        const path = String(url || "").split("?")[0].split("#")[0];
+        const parts = path.replace(/\\/g, "/").split("/");
+        return parts[parts.length - 1] || "";
+      }
+
       function logContext() {
         const presentIds = normalizePresentIds(runtimeState.presentIds);
         return {
@@ -1023,6 +1085,7 @@
           participantId: runtimeState.participantId || "",
           present: presentIds.join(";"),
           screen: currentScreenLabel(),
+          familiarFile: currentFamiliarFile || "",
           randomizeLayout: runtimeState.randomizeLayout !== false,
           layoutOrder: layoutOrder.join(";"),
           layoutIndex,
@@ -1062,9 +1125,25 @@
       logEvent("home_show", { reason: "app_start", screen: "start", event: "start_enter" });
       broadcastLayout();
 
+      function isCloseButtonExit() {
+        return runtimeState.closeButtonExit === true;
+      }
+
+      function syncMaxCloseButton() {
+        const btn = document.getElementById("maxCloseBtn");
+        if (!btn) return;
+        const show =
+          isCloseButtonExit() &&
+          document.body.classList.contains("maximized") &&
+          !onHomeScreen &&
+          !isEmergencyStop();
+        btn.hidden = !show;
+      }
+
       function setMax(tileEl, reason) {
         tiles.forEach((t) => t.setAttribute("data-max", t === tileEl ? "true" : "false"));
         document.body.classList.add("maximized");
+        syncMaxCloseButton();
         noteActivity();
         const fields = tileLogFields(tileEl);
         logEvent("tile_maximize", {
@@ -1081,9 +1160,16 @@
         const fields = tileLogFields(active);
         tiles.forEach((t) => t.removeAttribute("data-max"));
         document.body.classList.remove("maximized");
+        syncMaxCloseButton();
         noteActivity();
         const event =
-          reason === "idle" ? "idle_timeout" : reason === "esc" ? "esc_deselect" : "view_deselected";
+          reason === "idle"
+            ? "idle_timeout"
+            : reason === "esc"
+              ? "esc_deselect"
+              : reason === "close_button"
+                ? "close_button"
+                : "view_deselected";
         logEvent("tile_minimize", {
           ...fields,
           reason,
@@ -1096,13 +1182,32 @@
         if (isEmergencyStop()) return;
         if (onHomeScreen) return;
         if (inCooldown()) return;
-        // When maximized, whole screen is one tile — no edge dead-zone.
+        // Close-button mode: ignore taps on the maximized surface (only the X works).
+        if (document.body.classList.contains("maximized") && isCloseButtonExit()) return;
+        // When maximized (tap-to-return), whole screen is one tile — no edge dead-zone.
         if (!document.body.classList.contains("maximized")) {
           if (isInTileDeadZone(tileEl, clientX, clientY)) return;
         }
         markTap();
         if (document.body.classList.contains("maximized")) setFourUp("tap");
         else setMax(tileEl, "tap");
+      }
+
+      {
+        const maxCloseBtn = document.getElementById("maxCloseBtn");
+        if (maxCloseBtn) {
+          maxCloseBtn.addEventListener("pointerup", (e) => {
+            if (e.button != null && e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            if (isEmergencyStop() || onHomeScreen) return;
+            if (!document.body.classList.contains("maximized")) return;
+            if (!isCloseButtonExit()) return;
+            if (inCooldown()) return;
+            markTap();
+            setFourUp("close_button");
+          });
+        }
       }
 
       tiles.forEach((t) => {
@@ -1480,12 +1585,15 @@
 
         const playAt = (i) => {
           const url = urls[((i % urls.length) + urls.length) % urls.length];
+          const clipFile = basenameFromUrl(url);
           v.src = url;
+          if (setId === "familiar") currentFamiliarFile = clipFile;
           logEvent("video_clip_start", {
             tile: String(tileIndex + 1),
             content: contentLabelForView(setId),
             viewId: setId,
             url,
+            clipFile,
             clipIndex: i % urls.length,
           });
           return v.play().then(

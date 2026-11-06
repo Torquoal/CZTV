@@ -249,8 +249,18 @@
           Lock fullscreen (top-edge shield + ignore Esc)
         </label>
         <p class="hint" style="margin-top: 0">
-          When on, the wall stays fullscreen and blocks the top ~72px          
+          When on, the wall stays fullscreen and blocks the top ~72px.
           Quick toggle on the wall: <strong>Ctrl+Shift+F</strong>.
+        </p>
+
+        <label class="choice" style="margin-bottom: 12px">
+          <input id="closeButtonExit" type="checkbox" />
+          Close-button exit from maximized view
+        </label>
+        <p class="hint" style="margin-top: 0">
+          Experimental: when a panel is maximized, show a 200×200 white X button (from
+          <code>stop.png</code>) in the top-right; the rest of the screen ignores taps.
+          Off = traditional tap-anywhere to return to the 4-up wall. Saved with other wall settings.
         </p>
 
         <label for="tapCooldownMs" style="margin-top: 14px">Tap cooldown (ms)</label>
@@ -259,11 +269,11 @@
 
         <label for="edgeDeadZonePx" style="margin-top: 14px">Edge dead zone (px)</label>
         <input id="edgeDeadZonePx" type="number" min="0" max="400" step="4" value="48" />
-        <p class="hint">Untouchable border inside each tile so edge taps don’t select the wrong panel.</p>
+        <p class="hint">Untouchable border inside each tile (also sets the white frame around each panel).</p>
 
-        <label for="idleResetSec" style="margin-top: 14px">Idle reset to 4-up (seconds)</label>
-        <input id="idleResetSec" type="number" min="10" max="3600" step="10" value="300" />
-        <p class="hint">If maximized and no interaction for this long, return to the 4-view wall.</p>
+        <label for="idleResetMin" style="margin-top: 14px">Idle reset to 4-up (minutes)</label>
+        <input id="idleResetMin" type="number" min="1" max="60" step="1" value="5" />
+        <p class="hint">If maximized and no interaction for this long, return to the 4-view wall (minimum 1 minute).</p>
       </section>
 
       <section id="networkSection">
@@ -303,7 +313,7 @@
       </section>
     </div>
 
-    <script src="cztv-shared.js?v=13"></script>
+    <script src="cztv-shared.js?v=15"></script>
     <script>
       const {
         CHANNEL,
@@ -335,9 +345,10 @@
       const elRandomizeLayout = document.getElementById("randomizeLayout");
       const elShowCoderHud = document.getElementById("showCoderHud");
       const elLockFullscreen = document.getElementById("lockFullscreen");
+      const elCloseButtonExit = document.getElementById("closeButtonExit");
       const elTapCooldownMs = document.getElementById("tapCooldownMs");
       const elEdgeDeadZonePx = document.getElementById("edgeDeadZonePx");
-      const elIdleResetSec = document.getElementById("idleResetSec");
+      const elIdleResetMin = document.getElementById("idleResetMin");
       const btnEmergencyStop = document.getElementById("btnEmergencyStop");
       const btnEmergencyResume = document.getElementById("btnEmergencyResume");
       const elEmergencyStatus = document.getElementById("emergencyStatus");
@@ -510,6 +521,7 @@
         if (elRandomizeLayout) elRandomizeLayout.checked = s.randomizeLayout !== false;
         if (elShowCoderHud) elShowCoderHud.checked = s.showCoderHud === true;
         if (elLockFullscreen) elLockFullscreen.checked = s.lockFullscreen !== false;
+        if (elCloseButtonExit) elCloseButtonExit.checked = s.closeButtonExit === true;
         setEmergencyStatus(s.emergencyStop === true);
         if (elTapCooldownMs) {
           elTapCooldownMs.value = String(
@@ -521,9 +533,9 @@
             s.edgeDeadZonePx ?? (WALL_DEFAULTS && WALL_DEFAULTS.edgeDeadZonePx) ?? 48
           );
         }
-        if (elIdleResetSec) {
+        if (elIdleResetMin) {
           const ms = s.idleResetMs ?? (WALL_DEFAULTS && WALL_DEFAULTS.idleResetMs) ?? 300000;
-          elIdleResetSec.value = String(Math.round(ms / 1000));
+          elIdleResetMin.value = String(Math.max(1, Math.round(ms / 60000)));
         }
         const present = new Set(normalizePresentIds(s.presentIds));
         elPresentList.querySelectorAll("button[data-pid]").forEach((btn) => {
@@ -771,6 +783,16 @@
           });
         }
 
+        if (elCloseButtonExit) {
+          elCloseButtonExit.addEventListener("change", () => {
+            pushUpdate({ closeButtonExit: elCloseButtonExit.checked });
+            logControlEvent("close_button_exit_toggle", {
+              reason: "control",
+              message: elCloseButtonExit.checked ? "close_button" : "tap_to_return",
+            });
+          });
+        }
+
         if (btnEmergencyStop) {
           btnEmergencyStop.addEventListener("click", () => setEmergencyStop(true, "control_btn"));
         }
@@ -781,15 +803,17 @@
         function pushWallBehaviourFromInputs() {
           const cooldown = Number(elTapCooldownMs && elTapCooldownMs.value);
           const deadZone = Number(elEdgeDeadZonePx && elEdgeDeadZonePx.value);
-          const idleSec = Number(elIdleResetSec && elIdleResetSec.value);
+          const idleMin = Number(elIdleResetMin && elIdleResetMin.value);
           pushUpdate({
             tapCooldownMs: Number.isFinite(cooldown) ? cooldown : 2000,
-            edgeDeadZonePx: Number.isFinite(deadZone) ? deadZone : 48,
-            idleResetMs: Number.isFinite(idleSec) ? Math.round(idleSec * 1000) : 300000,
+            edgeDeadZonePx: Number.isFinite(deadZone) ? deadZone : 36,
+            idleResetMs: Number.isFinite(idleMin)
+              ? Math.round(Math.max(1, idleMin) * 60000)
+              : 300000,
           });
         }
 
-        [elTapCooldownMs, elEdgeDeadZonePx, elIdleResetSec].forEach((el) => {
+        [elTapCooldownMs, elEdgeDeadZonePx, elIdleResetMin].forEach((el) => {
           if (!el) return;
           el.addEventListener("change", pushWallBehaviourFromInputs);
           el.addEventListener("blur", pushWallBehaviourFromInputs);
