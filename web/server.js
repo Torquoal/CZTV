@@ -27,6 +27,7 @@ const CSV_FIELDS = [
   "url",
   "clipFile",
   "familiarFile",
+  "unfamiliarFile",
   "clipIndex",
   "layoutOrder",
   "layoutIndex",
@@ -75,6 +76,7 @@ const mime = new Map([
   [".mp4", "video/mp4"],
   [".webm", "video/webm"],
   [".mov", "video/quicktime"],
+  [".m4v", "video/mp4"],
   [".json", "application/json; charset=utf-8"],
   [".txt", "text/plain; charset=utf-8"],
   [".ico", "image/x-icon"],
@@ -146,6 +148,7 @@ function eventToRow(e) {
     url: e.url ?? "",
     clipFile,
     familiarFile: e.familiarFile ?? "",
+    unfamiliarFile: e.unfamiliarFile ?? "",
     clipIndex,
     layoutOrder,
     layoutIndex: e.layoutIndex ?? "",
@@ -224,8 +227,57 @@ const openRecordings = new Map();
 migrateLogCsvIfNeeded();
 fs.mkdirSync(recordingsDir, { recursive: true });
 
+const VIDEO_SET_IDS = ["familiar", "unfamiliar"];
+const VIDEO_SET_EXTS = new Set([".mp4", ".webm", ".mov", ".m4v"]);
+
+function listVideoSetUrls(setId) {
+  if (!VIDEO_SET_IDS.includes(setId)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const base of [mediaRoot, webMediaRoot]) {
+    const folder = path.join(base, setId);
+    if (!fs.existsSync(folder) || !fs.statSync(folder).isDirectory()) continue;
+    let names = [];
+    try {
+      names = fs.readdirSync(folder);
+    } catch {
+      continue;
+    }
+    for (const name of names.sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }))) {
+      const ext = path.extname(name).toLowerCase();
+      if (!VIDEO_SET_EXTS.has(ext)) continue;
+      const abs = path.join(folder, name);
+      try {
+        if (!fs.statSync(abs).isFile()) continue;
+      } catch {
+        continue;
+      }
+      if (seen.has(name)) continue;
+      seen.add(name);
+      out.push(`/media/${setId}/${name}`);
+    }
+  }
+  return out;
+}
+
+function videoSetsPayload() {
+  const sets = {};
+  for (const sid of VIDEO_SET_IDS) sets[sid] = listVideoSetUrls(sid);
+  return {
+    ok: true,
+    sets,
+    extensions: [...VIDEO_SET_EXTS].sort(),
+    note: ".mp4 (H.264) is recommended for Chrome/Edge. .mov is listed/served but often fails to play in Chromium.",
+  };
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
+
+  if (req.method === "GET" && url.pathname === "/api/video-sets") {
+    sendJson(res, 200, videoSetsPayload());
+    return;
+  }
 
   if (
     req.method === "POST" &&

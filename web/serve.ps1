@@ -15,10 +15,21 @@ $mediaSrc = Join-Path $scriptDir "..\media"
 $mediaDst = Join-Path $scriptDir "media"
 if (Test-Path $mediaSrc) {
   New-Item -ItemType Directory -Force -Path $mediaDst | Out-Null
+  foreach ($sub in @("familiar", "unfamiliar")) {
+    $srcSub = Join-Path $mediaSrc $sub
+    $dstSub = Join-Path $mediaDst $sub
+    New-Item -ItemType Directory -Force -Path $dstSub | Out-Null
+    if (Test-Path $srcSub) {
+      Get-ChildItem -Path $srcSub -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.Extension -match '\.(mp4|webm|mov|m4v)$' } |
+        ForEach-Object { Copy-Item -Path $_.FullName -Destination $dstSub -Force }
+    }
+  }
   Copy-Item -Path (Join-Path $mediaSrc "*.mp4") -Destination $mediaDst -Force -ErrorAction SilentlyContinue
-  Write-Info "Synced *.mp4 from ..\media into web\media (helps /media/ and plain static servers)."
+  Copy-Item -Path (Join-Path $mediaSrc "*.mov") -Destination $mediaDst -Force -ErrorAction SilentlyContinue
+  Write-Info "Synced media videos (incl. familiar/ + unfamiliar/) into web\media."
 } else {
-  Write-Warn "Folder not found: $mediaSrc - recorded /media/*.mp4 may 404 unless files exist in web\media."
+  Write-Warn "Folder not found: $mediaSrc - recorded /media clips may 404 unless files exist in web\media."
 }
 
 Write-Info "Serving CZTV web prototype from:"

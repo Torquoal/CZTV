@@ -1,8 +1,15 @@
 # Local media copy
 
-When you run `serve.ps1`, it copies `../media/*.mp4` into this folder so `http://localhost:8000/media/…` works even if the dev server does not map `/media/` to the repo root.
+When you run `serve.ps1`, it syncs `../media` video files (including `familiar/` and `unfamiliar/` subfolders) into this folder so `http://localhost:8000/media/…` works.
 
-These files are listed in `.gitignore` so they are not committed.
+## B-roll folders
+
+- `familiar/` — familiar chimpanzee clips
+- `unfamiliar/` — unfamiliar chimpanzee clips
+
+The wall discovers clips via `GET /api/video-sets` and shuffles playback order.
+
+**Format note:** `.mp4` (H.264) is the reliable choice for Chrome/Edge kiosk playback. `.mov` is served and listed, but many Chromium browsers will not play QuickTime `.mov` — convert those to `.mp4` when possible.
 
 ## Start screen
 

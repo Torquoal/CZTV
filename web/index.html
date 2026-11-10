@@ -186,16 +186,20 @@
         margin: 0;
         padding: 0;
         border: 0;
-        background: #000;
+        background: #ffffff;
         cursor: pointer;
         touch-action: manipulation;
         user-select: none;
         -webkit-user-select: none;
+        display: grid;
+        place-items: center;
       }
       #homeScreen img {
-        width: 100%;
-        height: 100%;
-        object-fit: cover;
+        width: min(84vmin, 1040px);
+        height: auto;
+        max-width: 92vw;
+        max-height: 85vh;
+        object-fit: contain;
         display: block;
         pointer-events: none;
       }
@@ -255,25 +259,25 @@
           <div class="tile" data-slot="1">
             <div class="tileBody">
               <div class="placeholder"></div>
-              <video class="feed" autoplay muted playsinline></video>
+              <video class="feed" autoplay muted playsinline volume="0"></video>
             </div>
           </div>
           <div class="tile" data-slot="2">
             <div class="tileBody">
               <div class="placeholder"></div>
-              <video class="feed" autoplay muted playsinline></video>
+              <video class="feed" autoplay muted playsinline volume="0"></video>
             </div>
           </div>
           <div class="tile" data-slot="3">
             <div class="tileBody">
               <div class="placeholder"></div>
-              <video class="feed" autoplay muted playsinline></video>
+              <video class="feed" autoplay muted playsinline volume="0"></video>
             </div>
           </div>
           <div class="tile" data-slot="4">
             <div class="tileBody">
               <div class="placeholder"></div>
-              <video class="feed" autoplay muted playsinline></video>
+              <video class="feed" autoplay muted playsinline volume="0"></video>
             </div>
           </div>
         </div>
@@ -287,7 +291,7 @@
     </button>
 
     <div id="homeScreen" role="button" aria-label="Start screen — tap to open wall" tabindex="0">
-      <img src="/media/placeholder.png" alt="" draggable="false" />
+      <img src="/media/icon.webp" alt="" draggable="false" />
     </div>
 
     <div id="stopScreen" hidden aria-label="Emergency stop" aria-live="assertive">
@@ -305,7 +309,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-    <script src="cztv-shared.js?v=15"></script>
+    <script src="cztv-shared.js?v=16"></script>
     <script>
       const tiles = Array.from(document.querySelectorAll(".tile"));
       const coderHud = document.getElementById("coderHud");
@@ -338,9 +342,9 @@
           idleResetMs: 300000,
         }));
       const writeState = CZTV.writeState || ((s) => s);
-      const VIDEO_SETS = CZTV.VIDEO_SETS || {
-        familiar: ["/media/chimpvid.mp4", "/media/chimps2vid.mp4"],
-        unfamiliar: ["/media/jungle.mp4", "/media/crossing.mp4"],
+      let VIDEO_SETS = {
+        familiar: [...((CZTV.VIDEO_SETS && CZTV.VIDEO_SETS.familiar) || [])],
+        unfamiliar: [...((CZTV.VIDEO_SETS && CZTV.VIDEO_SETS.unfamiliar) || [])],
       };
       const VIEW_LABELS = CZTV.VIEW_LABELS || {
         live1: "live 1 BRU",
@@ -596,6 +600,8 @@
         if (type === "emergency_resume") return "emergency_resume";
         if (type === "fullscreen_lock_toggle") return "fullscreen_lock_toggle";
         if (type === "video_clip_start") return "clip_start";
+        if (type === "familiar_clip_change") return "familiar_clip_change";
+        if (type === "unfamiliar_clip_change") return "unfamiliar_clip_change";
         if (type === "live_tile_ready") return "live_ready";
         if (type === "active_user_set") return "active_user_set";
         if (type === "presence_on") return "presence_on";
@@ -607,8 +613,10 @@
       }
 
       // USB webcam session recording (active while engagement screen is dismissed).
-      // Chunks are uploaded continuously — whole-file POST+keepalive was failing (~64KB limit).
+      // Camera frames are drawn to a canvas with a burned-in clock, then MediaRecorder
+      // captures that canvas stream (chunk-uploaded — whole-file POST was failing).
       let webcamStream = null;
+      let recordStream = null;
       let mediaRecorder = null;
       let recordingStartedAt = null;
       let recordingActive = false;
@@ -616,6 +624,9 @@
       let recordingFilename = "";
       let recordingQueue = Promise.resolve();
       let chunkUploadQueue = Promise.resolve();
+      let stampRaf = 0;
+      let stampVideoEl = null;
+      let stampCanvas = null;
 
       function pickRecorderMime() {
         const candidates = [
@@ -640,6 +651,91 @@
           .replace(/[:.]/g, "")
           .replace(/T/g, "_")
           .replace(/Z$/i, "");
+      }
+
+      function formatOverlayClock(d = new Date()) {
+        const pad = (n) => String(n).padStart(2, "0");
+        return (
+          `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+          `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+        );
+      }
+
+      function stopStampPipeline() {
+        if (stampRaf) {
+          cancelAnimationFrame(stampRaf);
+          stampRaf = 0;
+        }
+        if (stampVideoEl) {
+          try {
+            stampVideoEl.pause();
+            stampVideoEl.srcObject = null;
+          } catch {
+            /* ignore */
+          }
+          stampVideoEl = null;
+        }
+        stampCanvas = null;
+      }
+
+      function buildTimestampedRecordStream(cameraStream) {
+        const videoTrack = cameraStream.getVideoTracks()[0];
+        const settings = videoTrack && videoTrack.getSettings ? videoTrack.getSettings() : {};
+        const width = Math.max(320, Number(settings.width) || 1280);
+        const height = Math.max(240, Number(settings.height) || 720);
+
+        const videoEl = document.createElement("video");
+        videoEl.muted = true;
+        videoEl.playsInline = true;
+        videoEl.setAttribute("playsinline", "");
+        videoEl.srcObject = cameraStream;
+
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+
+        stampVideoEl = videoEl;
+        stampCanvas = canvas;
+
+        const draw = () => {
+          if (!stampCanvas || !stampVideoEl) return;
+          try {
+            ctx.drawImage(videoEl, 0, 0, canvas.width, canvas.height);
+            const label = formatOverlayClock();
+            const fontPx = Math.max(22, Math.round(canvas.height * 0.045));
+            ctx.font = `bold ${fontPx}px ui-monospace, Consolas, monospace`;
+            ctx.textBaseline = "top";
+            const pad = Math.round(fontPx * 0.45);
+            const metrics = ctx.measureText(label);
+            const boxW = Math.ceil(metrics.width) + pad * 2;
+            const boxH = Math.ceil(fontPx * 1.35) + pad;
+            const x = pad;
+            const y = pad;
+            ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+            ctx.fillRect(x, y, boxW, boxH);
+            ctx.fillStyle = "#ffffff";
+            ctx.fillText(label, x + pad, y + Math.round(pad * 0.55));
+          } catch {
+            /* ignore transient draw errors before first frame */
+          }
+          stampRaf = requestAnimationFrame(draw);
+        };
+
+        const playP = videoEl.play().catch(() => {});
+        stampRaf = requestAnimationFrame(draw);
+
+        const canvasStream = canvas.captureStream(30);
+        // Keep mic audio from the camera stream when present.
+        cameraStream.getAudioTracks().forEach((t) => {
+          try {
+            canvasStream.addTrack(t);
+          } catch {
+            /* ignore */
+          }
+        });
+
+        return playP.then(() => canvasStream);
       }
 
       function enqueueChunkUpload(blob) {
@@ -676,20 +772,32 @@
               return;
             }
 
-            let stream;
+            let cameraStream;
             try {
               try {
-                stream = await navigator.mediaDevices.getUserMedia({
+                cameraStream = await navigator.mediaDevices.getUserMedia({
                   video: { width: { ideal: 1280 }, height: { ideal: 720 } },
                   audio: true,
                 });
               } catch {
-                stream = await navigator.mediaDevices.getUserMedia({
+                cameraStream = await navigator.mediaDevices.getUserMedia({
                   video: true,
                   audio: false,
                 });
               }
             } catch (err) {
+              logEvent("webcam_error", {
+                message: String(err && err.message ? err.message : err),
+              });
+              return;
+            }
+
+            let composed;
+            try {
+              composed = await buildTimestampedRecordStream(cameraStream);
+            } catch (err) {
+              cameraStream.getTracks().forEach((t) => t.stop());
+              stopStampPipeline();
               logEvent("webcam_error", {
                 message: String(err && err.message ? err.message : err),
               });
@@ -716,7 +824,9 @@
                 throw new Error((opened && opened.error) || `start_failed_${res.status}`);
               }
             } catch (err) {
-              stream.getTracks().forEach((t) => t.stop());
+              cameraStream.getTracks().forEach((t) => t.stop());
+              if (composed) composed.getTracks().forEach((t) => t.stop());
+              stopStampPipeline();
               logEvent("webcam_error", {
                 message: String(err && err.message ? err.message : err),
               });
@@ -725,7 +835,8 @@
 
             recordingId = opened.id;
             recordingFilename = opened.filename || filename;
-            webcamStream = stream;
+            webcamStream = cameraStream;
+            recordStream = composed;
             chunkUploadQueue = Promise.resolve();
 
             const opts = mimeType
@@ -733,10 +844,13 @@
               : { videoBitsPerSecond: 2_500_000 };
             let recorder;
             try {
-              recorder = new MediaRecorder(stream, opts);
+              recorder = new MediaRecorder(composed, opts);
             } catch (err) {
-              stream.getTracks().forEach((t) => t.stop());
+              cameraStream.getTracks().forEach((t) => t.stop());
+              composed.getTracks().forEach((t) => t.stop());
+              stopStampPipeline();
               webcamStream = null;
+              recordStream = null;
               try {
                 await fetch(`/api/recording/finish?id=${encodeURIComponent(recordingId)}`, {
                   method: "POST",
@@ -764,8 +878,11 @@
               // 2s timeslices → small POSTs that survive reliably (unlike one giant upload).
               recorder.start(2000);
             } catch (err) {
-              stream.getTracks().forEach((t) => t.stop());
+              cameraStream.getTracks().forEach((t) => t.stop());
+              composed.getTracks().forEach((t) => t.stop());
+              stopStampPipeline();
               webcamStream = null;
+              recordStream = null;
               mediaRecorder = null;
               try {
                 await fetch(`/api/recording/finish?id=${encodeURIComponent(recordingId)}`, {
@@ -783,7 +900,7 @@
             recordingActive = true;
             logEvent("webcam_start", {
               reason: "active",
-              message: recordingFilename,
+              message: `${recordingFilename};timestamp_overlay`,
               screen: "wall",
               event: "webcam_start",
             });
@@ -800,18 +917,22 @@
         recordingQueue = recordingQueue
           .then(async () => {
             const recorder = mediaRecorder;
-            const stream = webcamStream;
+            const cameraStream = webcamStream;
+            const composed = recordStream;
             const id = recordingId;
             const savedName = recordingFilename;
             mediaRecorder = null;
             webcamStream = null;
+            recordStream = null;
             recordingStartedAt = null;
             recordingId = null;
             recordingFilename = "";
             recordingActive = false;
 
             if (!recorder && !id) {
-              if (stream) stream.getTracks().forEach((t) => t.stop());
+              stopStampPipeline();
+              if (cameraStream) cameraStream.getTracks().forEach((t) => t.stop());
+              if (composed) composed.getTracks().forEach((t) => t.stop());
               return;
             }
 
@@ -830,7 +951,9 @@
             await new Promise((r) => setTimeout(r, 50));
             await chunkUploadQueue.catch(() => {});
 
-            if (stream) stream.getTracks().forEach((t) => t.stop());
+            stopStampPipeline();
+            if (composed) composed.getTracks().forEach((t) => t.stop());
+            if (cameraStream) cameraStream.getTracks().forEach((t) => t.stop());
 
             if (!id) {
               logEvent("webcam_stop", {
@@ -945,8 +1068,24 @@
         });
       }
 
+      function forceMuteVideo(v) {
+        if (!v) return;
+        try {
+          v.muted = true;
+          v.defaultMuted = true;
+          v.volume = 0;
+        } catch {
+          /* ignore */
+        }
+      }
+
+      function forceMuteAllFeeds() {
+        document.querySelectorAll("video.feed").forEach(forceMuteVideo);
+      }
+
       function resumeAllFeeds() {
         document.querySelectorAll("video.feed").forEach((v) => {
+          forceMuteVideo(v);
           try {
             const p = v.play();
             if (p && typeof p.catch === "function") p.catch(() => {});
@@ -1060,17 +1199,50 @@
         if (!wallStarted) startWall();
       }
 
+      /** Short researcher cue when engagement screen is tapped (only intentional speaker audio). */
+      function playEngagementBeep() {
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return;
+          const ctx = new AC();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = 880;
+          gain.gain.value = 0.0001;
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          const t0 = ctx.currentTime;
+          gain.gain.setValueAtTime(0.0001, t0);
+          gain.gain.exponentialRampToValueAtTime(0.18, t0 + 0.01);
+          gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.14);
+          osc.start(t0);
+          osc.stop(t0 + 0.15);
+          osc.onended = () => {
+            try {
+              ctx.close();
+            } catch {
+              /* ignore */
+            }
+          };
+        } catch {
+          /* ignore */
+        }
+      }
+
       function handleHomePointer() {
         if (isEmergencyStop()) return;
         if (!onHomeScreen) return;
         if (inCooldown()) return;
         markTap();
+        playEngagementBeep();
         if (isFullscreenLocked()) requestWallFullscreen();
         hideHomeScreen("tap");
       }
 
-      /** Basename of currently playing familiar (chimp) playlist clip — for participant matching. */
+      /** Basename of currently playing familiar / unfamiliar playlist clips. */
       let currentFamiliarFile = "";
+      let currentUnfamiliarFile = "";
 
       function basenameFromUrl(url) {
         const path = String(url || "").split("?")[0].split("#")[0];
@@ -1086,6 +1258,7 @@
           present: presentIds.join(";"),
           screen: currentScreenLabel(),
           familiarFile: currentFamiliarFile || "",
+          unfamiliarFile: currentUnfamiliarFile || "",
           randomizeLayout: runtimeState.randomizeLayout !== false,
           layoutOrder: layoutOrder.join(";"),
           layoutIndex,
@@ -1113,6 +1286,14 @@
         enqueueForServer(entry);
       }
 
+      // Fresh coding roster each wall load: active PX, no present participants selected.
+      runtimeState = writeState({
+        ...readState(),
+        participantId: "PX",
+        presentIds: [],
+      });
+      broadcastState(runtimeState);
+
       applyLayoutToDom();
       updateCoderHud();
       // Begin on the start image; wall media preloads underneath.
@@ -1120,7 +1301,11 @@
       if (homeScreen) homeScreen.hidden = false;
       syncFullscreenLockUi();
       syncEmergencyUi();
-      logEvent("app_start", { href: location.href, screen: "start" });
+      logEvent("app_start", {
+        href: location.href,
+        screen: "start",
+        message: "active=PX;present=",
+      });
       logEvent("layout_assigned", { screen: "start" });
       logEvent("home_show", { reason: "app_start", screen: "start", event: "start_enter" });
       broadcastLayout();
@@ -1373,6 +1558,14 @@
       let mediaInFlight = false;
       let wallStarted = false;
 
+      // Hard-mute all wall videos; engagement beep is the only speaker audio.
+      feeds.forEach((v) => {
+        forceMuteVideo(v);
+        v.addEventListener("volumechange", () => forceMuteVideo(v));
+        v.addEventListener("play", () => forceMuteVideo(v));
+      });
+      forceMuteAllFeeds();
+
       function stopHlsPlayers() {
         hlsPlayers.forEach((h) => {
           try {
@@ -1444,10 +1637,13 @@
             resolve(ok);
           };
 
+          forceMuteVideo(video);
+
           if (window.Hls && window.Hls.isSupported()) {
             const hls = new window.Hls({ lowLatencyMode: true, backBufferLength: 0 });
             hlsPlayers.push(hls);
             hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+              forceMuteVideo(video);
               video
                 .play()
                 .then(() => done(true))
@@ -1463,6 +1659,7 @@
 
           if (video.canPlayType("application/vnd.apple.mpegurl")) {
             video.src = url;
+            forceMuteVideo(video);
             video
               .play()
               .then(() => done(true))
@@ -1564,60 +1761,163 @@
         return { expected, ok };
       }
 
+      function shuffleInPlace(arr) {
+        for (let i = arr.length - 1; i > 0; i -= 1) {
+          const j = Math.floor(Math.random() * (i + 1));
+          const tmp = arr[i];
+          arr[i] = arr[j];
+          arr[j] = tmp;
+        }
+        return arr;
+      }
+
+      async function refreshVideoSetsFromServer() {
+        try {
+          const res = await fetch("/api/video-sets", { cache: "no-store" });
+          if (!res.ok) return VIDEO_SETS;
+          const data = await res.json();
+          if (!data || !data.sets) return VIDEO_SETS;
+          VIDEO_SETS = {
+            familiar: Array.isArray(data.sets.familiar) ? data.sets.familiar.filter(Boolean) : [],
+            unfamiliar: Array.isArray(data.sets.unfamiliar)
+              ? data.sets.unfamiliar.filter(Boolean)
+              : [],
+          };
+        } catch {
+          /* keep fallback VIDEO_SETS */
+        }
+        return VIDEO_SETS;
+      }
+
       function startVideoPlaylist(tileIndex, setId) {
-        const urls = (VIDEO_SETS[setId] || []).filter(Boolean);
+        const sourceUrls = (VIDEO_SETS[setId] || []).filter(Boolean);
         const label = VIEW_LABELS[setId] || setId;
         const v = feeds[tileIndex];
         if (!v) return false;
 
-        if (!urls.length) {
-          setPlaceholder(tileIndex, `${label}\nNo clips configured`);
+        if (!sourceUrls.length) {
+          setPlaceholder(
+            tileIndex,
+            `${label}\nNo clips in /media/${setId}/\n(Add .mp4 files, then reload)`
+          );
           return false;
         }
 
         setPlaceholder(tileIndex, label);
-        v.muted = true;
+        forceMuteVideo(v);
         v.playsInline = true;
         v.srcObject = null;
-        v.loop = urls.length === 1;
+        v.loop = sourceUrls.length === 1;
 
-        let idx = Math.floor(Math.random() * urls.length);
+        // Fresh shuffled order for this session pass; reshuffle when the list is exhausted.
+        let order = shuffleInPlace(sourceUrls.slice());
+        let idx = 0;
+        let lastUrl = "";
+
+        const reshuffleOrder = () => {
+          const prev = lastUrl;
+          shuffleInPlace(order);
+          if (order.length > 1 && prev && order[0] === prev) {
+            const swap = 1 + Math.floor(Math.random() * (order.length - 1));
+            const tmp = order[0];
+            order[0] = order[swap];
+            order[swap] = tmp;
+          }
+          idx = 0;
+        };
 
         const playAt = (i) => {
-          const url = urls[((i % urls.length) + urls.length) % urls.length];
+          if (!order.length) return Promise.resolve(false);
+          const url = order[((i % order.length) + order.length) % order.length];
           const clipFile = basenameFromUrl(url);
+          const prevFile =
+            setId === "familiar" ? currentFamiliarFile : currentUnfamiliarFile;
+          lastUrl = url;
           v.src = url;
-          if (setId === "familiar") currentFamiliarFile = clipFile;
-          logEvent("video_clip_start", {
-            tile: String(tileIndex + 1),
-            content: contentLabelForView(setId),
-            viewId: setId,
-            url,
-            clipFile,
-            clipIndex: i % urls.length,
-          });
+          forceMuteVideo(v);
           return v.play().then(
             () => {
               markTileReady(tileIndex, true);
+              if (setId === "familiar") currentFamiliarFile = clipFile;
+              if (setId === "unfamiliar") currentUnfamiliarFile = clipFile;
+
+              // Always log a dedicated change event once the clip is actually playing,
+              // including the first clip and every advance — even with no other activity.
+              const changeType =
+                setId === "familiar" ? "familiar_clip_change" : "unfamiliar_clip_change";
+              logEvent(changeType, {
+                tile: String(tileIndex + 1),
+                content: contentLabelForView(setId),
+                viewId: setId,
+                url,
+                clipFile,
+                familiarFile: currentFamiliarFile || "",
+                unfamiliarFile: currentUnfamiliarFile || "",
+                clipIndex: i % order.length,
+                reason: prevFile && prevFile !== clipFile ? "advance" : "start",
+                message: prevFile ? `${prevFile}→${clipFile}` : `shuffle_${order.length}`,
+                event: changeType,
+              });
               return true;
             },
-            () => false
+            () => {
+              // Unsupported container/codec (common with some .mov files) → skip ahead.
+              logEvent("video_clip_error", {
+                tile: String(tileIndex + 1),
+                content: contentLabelForView(setId),
+                viewId: setId,
+                url,
+                clipFile,
+                familiarFile: currentFamiliarFile || "",
+                unfamiliarFile: currentUnfamiliarFile || "",
+                message: "play_failed_skip",
+              });
+              return false;
+            }
           );
         };
 
+        const advance = async () => {
+          if (order.length <= 1) {
+            // Single clip uses video.loop; avoid re-logging a "change".
+            forceMuteVideo(v);
+            try {
+              const p = v.play();
+              if (p && typeof p.catch === "function") p.catch(() => {});
+            } catch {
+              /* ignore */
+            }
+            return;
+          }
+          idx += 1;
+          if (idx >= order.length) reshuffleOrder();
+          const ok = await playAt(idx);
+          if (!ok) {
+            // Try a few more clips so one bad .mov doesn't stall the tile.
+            for (let tries = 0; tries < Math.min(5, order.length - 1); tries += 1) {
+              idx += 1;
+              if (idx >= order.length) reshuffleOrder();
+              if (await playAt(idx)) return;
+            }
+          }
+        };
+
         const onEnded = () => {
-          if (urls.length <= 1) return;
-          idx = (idx + 1) % urls.length;
-          playAt(idx);
+          advance();
         };
 
         v.addEventListener("ended", onEnded);
         playlistHandlers.push({ video: v, onEnded });
 
-        return playAt(idx);
+        return playAt(idx).then(async (ok) => {
+          if (ok) return true;
+          await advance();
+          return Boolean(v.getAttribute("data-ready") === "true" || v.src);
+        });
       }
 
       async function startVideoTiles() {
+        await refreshVideoSetsFromServer();
         const videoViews = ["familiar", "unfamiliar"];
         const results = await Promise.all(
           videoViews.map(async (setId) => {

@@ -17,9 +17,13 @@ MEDIA_MIME = {
     ".mp4": "video/mp4",
     ".webm": "video/webm",
     ".mov": "video/quicktime",
+    ".m4v": "video/mp4",
     ".m3u8": "application/vnd.apple.mpegurl",
     ".ts": "video/mp2t",
 }
+
+VIDEO_SET_EXTS = {".mp4", ".webm", ".mov", ".m4v"}
+VIDEO_SET_IDS = ("familiar", "unfamiliar")
 
 from rtsp_bridge import (
     ensure_stream,
@@ -60,6 +64,7 @@ CSV_FIELDS = [
     "url",
     "clipFile",
     "familiarFile",
+    "unfamiliarFile",
     "clipIndex",
     "layoutOrder",
     "layoutIndex",
@@ -123,6 +128,46 @@ def _join_list(value) -> str:
     return str(value)
 
 
+def list_video_set_urls(set_id: str) -> list[str]:
+    """List playable clips under media/<set_id>/ (repo media first, then web/media)."""
+    if set_id not in VIDEO_SET_IDS:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for base in (MEDIA_ROOT, (ROOT / "media").resolve()):
+        folder = base / set_id
+        if not folder.is_dir():
+            continue
+        try:
+            files = sorted(folder.iterdir(), key=lambda p: p.name.lower())
+        except OSError:
+            continue
+        for f in files:
+            if not f.is_file():
+                continue
+            if f.suffix.lower() not in VIDEO_SET_EXTS:
+                continue
+            name = f.name
+            if name in seen:
+                continue
+            seen.add(name)
+            out.append(f"/media/{set_id}/{name}")
+    return out
+
+
+def video_sets_payload() -> dict:
+    sets = {sid: list_video_set_urls(sid) for sid in VIDEO_SET_IDS}
+    return {
+        "ok": True,
+        "sets": sets,
+        "extensions": sorted(VIDEO_SET_EXTS),
+        "note": (
+            ".mp4 (H.264) is recommended for Chrome/Edge. "
+            ".mov is listed/served but often fails to play in Chromium."
+        ),
+    }
+
+
 def event_to_row(e: dict) -> dict:
     present = e.get("present", "")
     if not present:
@@ -154,6 +199,7 @@ def event_to_row(e: dict) -> dict:
         "clipFile": e.get("clipFile", "")
         or (Path(str(e.get("url", ""))).name if e.get("url") else ""),
         "familiarFile": e.get("familiarFile", ""),
+        "unfamiliarFile": e.get("unfamiliarFile", ""),
         "clipIndex": clip_index,
         "layoutOrder": layout_order,
         "layoutIndex": e.get("layoutIndex", ""),
@@ -266,6 +312,9 @@ class Handler(SimpleHTTPRequestHandler):
             return
         if path_only == "/api/cameras":
             self._send_json(public_config(load_config()))
+            return
+        if path_only == "/api/video-sets":
+            self._send_json(video_sets_payload())
             return
         if path_only.startswith("/stream/") and path_only.endswith("/index.m3u8"):
             parts = [x for x in path_only.split("/") if x]

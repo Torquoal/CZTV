@@ -307,13 +307,15 @@
       <section id="videoSetsSection">
         <h2>Recorded video sets</h2>
         <p class="hint" style="margin-top: 0">
-          Each video tile cycles through its set. Later these can become “familiar chimps” vs “unfamiliar chimps”.
+          Drop clips into <code>web/media/familiar/</code> and <code>web/media/unfamiliar/</code>.
+          The wall loads them via <code>/api/video-sets</code> and plays each set in shuffled order.
+          Prefer <strong>.mp4 (H.264)</strong> — <code>.mov</code> is often not playable in Chrome/Edge.
         </p>
         <div id="videoSetLists"></div>
       </section>
     </div>
 
-    <script src="cztv-shared.js?v=15"></script>
+    <script src="cztv-shared.js?v=16"></script>
     <script>
       const {
         CHANNEL,
@@ -426,14 +428,27 @@
         }
       }
 
-      function buildVideoSetLists() {
+      async function buildVideoSetLists() {
         elVideoSetLists.innerHTML = "";
-        for (const [setId, urls] of Object.entries(VIDEO_SETS)) {
+        let sets = VIDEO_SETS || {};
+        try {
+          const res = await fetch("/api/video-sets", { cache: "no-store" });
+          if (res.ok) {
+            const data = await res.json();
+            if (data && data.sets) sets = data.sets;
+          }
+        } catch {
+          /* keep fallback */
+        }
+        for (const setId of ["familiar", "unfamiliar"]) {
+          const urls = Array.isArray(sets[setId]) ? sets[setId] : [];
           const block = document.createElement("div");
           block.className = "cam-row";
-          const items = urls.map((u) => `<li><code>${u}</code></li>`).join("");
+          const items = urls.length
+            ? urls.map((u) => `<li><code>${u}</code></li>`).join("")
+            : `<li class="hint">No clips yet — add files to <code>web/media/${setId}/</code></li>`;
           block.innerHTML = `
-            <h3>${VIEW_LABELS[setId] || setId} (<code>${setId}</code>)</h3>
+            <h3>${(VIEW_LABELS && VIEW_LABELS[setId]) || setId} (<code>${setId}</code>) — ${urls.length} clip(s)</h3>
             <ul class="clip-list">${items}</ul>
           `;
           elVideoSetLists.appendChild(block);

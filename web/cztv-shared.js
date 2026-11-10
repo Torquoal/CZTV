@@ -42,10 +42,15 @@
     familiar: "video 2 familiar",
   };
 
-  /** @type {Record<string, string[]>} setId -> playlist URLs for video views */
+  /**
+   * Fallback playlists if /api/video-sets is unavailable.
+   * Preferred source: drop clips in web/media/familiar/ and web/media/unfamiliar/
+   * (discovered automatically by the server).
+   * @type {Record<string, string[]>}
+   */
   const VIDEO_SETS = {
-    familiar: ["/media/chimpvid.mp4", "/media/chimps2vid.mp4"],
-    unfamiliar: ["/media/jungle.mp4", "/media/crossing.mp4"],
+    familiar: [],
+    unfamiliar: [],
   };
 
   /**
